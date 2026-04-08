@@ -3,9 +3,13 @@ import type { ActiveLessonView } from "../types/lesson";
 
 interface LessonReaderProps {
   lesson: ActiveLessonView | null;
+  isCompletingLesson: boolean;
+  isLessonCompleted: boolean;
   isOpen: boolean;
   isWaitingForFirstToken: boolean;
   onClose: () => void;
+  onCompleteLesson: () => void;
+  onPlayRewardGame: () => void;
   onSpeakText: (text: string) => void;
 }
 
@@ -95,9 +99,13 @@ function parseLessonBlocks(content: string): LessonBlock[] {
 
 export function LessonReader({
   lesson,
+  isCompletingLesson,
+  isLessonCompleted,
   isOpen,
   isWaitingForFirstToken,
   onClose,
+  onCompleteLesson,
+  onPlayRewardGame,
   onSpeakText,
 }: LessonReaderProps) {
   if (!isOpen || !lesson) {
@@ -163,14 +171,28 @@ export function LessonReader({
         </div>
 
         <div className="lesson-reader-footer">
-          <button
-            className="read-button"
-            type="button"
-            disabled={!canReadFullLesson}
-            onClick={() => onSpeakText(`${lesson.title}. ${lesson.content}`)}
-          >
-            Read Full Lesson
-          </button>
+          <div className="lesson-reader-primary-actions">
+            <button
+              className="read-button"
+              type="button"
+              disabled={!canReadFullLesson}
+              onClick={() => onSpeakText(`${lesson.title}. ${lesson.content}`)}
+            >
+              Read Full Lesson
+            </button>
+            <button
+              className="grow-button"
+              type="button"
+              disabled={!canReadFullLesson || isWaitingForFirstToken || isCompletingLesson}
+              onClick={isLessonCompleted ? onPlayRewardGame : onCompleteLesson}
+            >
+              {isCompletingLesson
+                ? "Saving Progress..."
+                : isLessonCompleted
+                ? "Play Reward Game"
+                : "Complete Lesson"}
+            </button>
+          </div>
 
           {lesson.vocabulary_words.length > 0 ? (
             <div className="vocabulary-chip-row">

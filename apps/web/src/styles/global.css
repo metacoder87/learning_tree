@@ -741,11 +741,16 @@ input:focus-visible {
   overflow: hidden;
 }
 
+.bubble-playfield.spacious {
+  min-height: 320px;
+  padding: 10px;
+}
+
 .word-bubble {
   position: absolute;
-  min-width: 86px;
-  min-height: 86px;
-  padding: 16px;
+  min-width: 88px;
+  min-height: 88px;
+  padding: 14px;
   border: 0;
   border-radius: 999px;
   background: linear-gradient(180deg, #fff7ae 0%, #ffdb8a 100%);
@@ -792,10 +797,17 @@ input:focus-visible {
   border: 3px dashed rgba(87, 114, 76, 0.4);
   background: rgba(255, 255, 255, 0.58);
   color: #5a7254;
+  text-align: center;
 }
 
 .pattern-choice {
   cursor: grab;
+}
+
+.pattern-choice.active,
+.pattern-gap:hover,
+.pattern-gap:focus-visible {
+  box-shadow: 0 0 0 4px rgba(241, 169, 54, 0.24);
 }
 
 .pattern-choice.red,
@@ -873,6 +885,25 @@ input:focus-visible {
   text-align: center;
 }
 
+.reward-modal .warmup-shell {
+  display: grid;
+  gap: 18px;
+}
+
+.reward-modal-header {
+  display: flex;
+  gap: 14px;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.reward-modal-title {
+  margin: 0;
+  font-size: clamp(1.8rem, 4vw, 2.5rem);
+  color: #21401d;
+}
+
 .lesson-reader-overlay {
   position: fixed;
   inset: 0;
@@ -929,6 +960,12 @@ input:focus-visible {
   gap: 12px;
 }
 
+.lesson-reader-primary-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .lesson-reader-body p {
   padding: 18px 20px;
   border-radius: 24px;
@@ -982,6 +1019,115 @@ input:focus-visible {
   gap: 10px;
   font-size: 1.08rem;
   line-height: 1.6;
+}
+
+.lesson-challenge-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 19;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(24, 39, 18, 0.34);
+  backdrop-filter: blur(8px);
+}
+
+.lesson-challenge-card {
+  width: min(840px, 100%);
+  max-height: min(90vh, 920px);
+  overflow: auto;
+  padding: 24px;
+  border-radius: 30px;
+  background:
+    radial-gradient(circle at top, rgba(255, 248, 191, 0.66), transparent 42%),
+    linear-gradient(180deg, #fffef6 0%, #eef8d7 100%);
+  box-shadow: 0 24px 60px rgba(34, 67, 31, 0.18);
+  display: grid;
+  gap: 18px;
+}
+
+.lesson-challenge-header,
+.lesson-challenge-footer {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.lesson-challenge-header h2 {
+  margin: 0;
+  font-size: clamp(1.9rem, 4vw, 2.7rem);
+  color: #21401d;
+}
+
+.lesson-challenge-body {
+  display: grid;
+  gap: 14px;
+}
+
+.challenge-question-card {
+  padding: 18px;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.76);
+  display: grid;
+  gap: 14px;
+}
+
+.challenge-question-number,
+.challenge-feedback,
+.challenge-blank-field span {
+  margin: 0;
+  color: #55714f;
+  font-weight: 700;
+}
+
+.challenge-question-prompt {
+  display: grid;
+  gap: 8px;
+}
+
+.challenge-question-prompt p {
+  margin: 0;
+  color: #274223;
+  line-height: 1.55;
+}
+
+.challenge-choice-grid {
+  display: grid;
+  gap: 10px;
+}
+
+.challenge-choice {
+  min-height: 56px;
+  padding: 12px 16px;
+  border: 0;
+  border-radius: 18px;
+  background: linear-gradient(180deg, #fffaf1 0%, #f7ffd8 100%);
+  color: #24411d;
+  font-weight: 800;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: 0 12px 22px rgba(44, 78, 36, 0.14);
+}
+
+.challenge-choice.active {
+  background: linear-gradient(180deg, #70b352 0%, #4d8d37 100%);
+  color: #fffef7;
+}
+
+.challenge-blank-field {
+  display: grid;
+  gap: 8px;
+}
+
+.challenge-blank-field input {
+  min-height: 56px;
+  padding: 12px 16px;
+  border: 2px solid rgba(103, 145, 70, 0.18);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #24411d;
 }
 
 @keyframes bubbleFloat {

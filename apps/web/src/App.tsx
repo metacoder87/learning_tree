@@ -1,19 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ParentMenuDrawer } from "./features/layout/components/ParentMenuDrawer";
+import { LessonChallengeModal } from "./features/lessons/components/LessonChallengeModal";
 import { LessonReader } from "./features/lessons/components/LessonReader";
 import { useLessonHistory } from "./features/lessons/hooks/useLessonHistory";
 import type { ActiveLessonView, LessonHistoryItem } from "./features/lessons/types/lesson";
 import { ProfileSelector } from "./features/profiles/components/ProfileSelector";
 import { ProfileSwitcher } from "./features/profiles/components/ProfileSwitcher";
 import { useProfiles } from "./features/profiles/hooks/useProfiles";
+import { RewardGameModal } from "./features/rewards/components/RewardGameModal";
 import { AccessibleLeafNavigator } from "./features/tree/components/AccessibleLeafNavigator";
 import { CurrentLeafOverlay } from "./features/tree/components/CurrentLeafOverlay";
 import { LearningTreeCanvas } from "./features/tree/components/LearningTreeCanvas";
 import { useLeafSpeech } from "./features/tree/hooks/useLeafSpeech";
 import { useTreeData } from "./features/tree/hooks/useTreeData";
 import type { LeafNode } from "./features/tree/types/tree";
-import { WarmupGameModal } from "./features/warmup/components/WarmupGameModal";
 import { fetchJson, streamSse, type SseMessage } from "./lib/api";
 import { useAiHealth } from "./lib/useAiHealth";
 
@@ -72,7 +73,12 @@ interface LessonStreamErrorEvent {
   message: string;
 }
 
-const WARMUP_APPEAR_DELAY_MS = 700;
+interface LessonCompletionResponse {
+  lesson: LessonHistoryItem;
+  mastery_level: number;
+  lessons_completed: number;
+  completed_now: boolean;
+}
 
 
 function createProvisionalLesson(leaf: LeafNode): ActiveLessonView {
@@ -85,6 +91,10 @@ function createProvisionalLesson(leaf: LeafNode): ActiveLessonView {
     title: leaf.title,
     content: "",
     vocabulary_words: [],
+    is_completed: false,
+    challenge_score: null,
+    challenge_total: null,
+    completed_at: null,
     created_at: new Date().toISOString(),
     stream_state: "waiting",
     stream_model: null,
@@ -139,9 +149,11 @@ export default function App() {
   const [lessonError, setLessonError] = useState<string | null>(null);
   const [isGeneratingLesson, setIsGeneratingLesson] = useState(false);
   const [isWaitingForFirstToken, setIsWaitingForFirstToken] = useState(false);
-  const [warmupSession, setWarmupSession] = useState(0);
-  const [showWarmupGame, setShowWarmupGame] = useState(false);
   const [isLessonReaderOpen, setIsLessonReaderOpen] = useState(false);
+  const [isChallengeOpen, setIsChallengeOpen] = useState(false);
+  const [isCompletingLesson, setIsCompletingLesson] = useState(false);
+  const [rewardSession, setRewardSession] = useState(0);
+  const [isRewardGameOpen, setIsRewardGameOpen] = useState(false);
   const [isGrowingBranch, setIsGrowingBranch] = useState(false);
   const [branchGrowthMessage, setBranchGrowthMessage] = useState<string | null>(null);
   const [branchGrowthError, setBranchGrowthError] = useState<string | null>(null);
@@ -188,7 +200,9 @@ export default function App() {
     setIsParentMenuOpen(false);
     setIsGeneratingLesson(false);
     setIsWaitingForFirstToken(false);
-    setShowWarmupGame(false);
+    setIsChallengeOpen(false);
+    setIsCompletingLesson(false);
+    setIsRewardGameOpen(false);
     streamAbortRef.current?.abort();
     streamAbortRef.current = null;
   }, [selectedProfileId]);
@@ -198,16 +212,6 @@ export default function App() {
       setSelectedLeafId(null);
     }
   }, [selectedLeaf, selectedLeafId]);
-
-  useEffect(() => {
-    if (!(isGeneratingLesson && isWaitingForFirstToken)) {
-      setShowWarmupGame(false);
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => setShowWarmupGame(true), WARMUP_APPEAR_DELAY_MS);
-    return () => window.clearTimeout(timeoutId);
-  }, [isGeneratingLesson, isWaitingForFirstToken]);
 
   const abortCurrentStream = useCallback(() => {
     streamAbortRef.current?.abort();
@@ -220,6 +224,8 @@ export default function App() {
       setHasEnteredTree(true);
       setSelectedLeafId(null);
       setActiveLesson(null);
+      setIsChallengeOpen(false);
+      setIsRewardGameOpen(false);
       setIsParentMenuOpen(false);
     },
     [selectProfile],
@@ -235,6 +241,8 @@ export default function App() {
       setHasEnteredTree(true);
       setSelectedLeafId(null);
       setActiveLesson(null);
+      setIsChallengeOpen(false);
+      setIsRewardGameOpen(false);
       setIsParentMenuOpen(false);
     },
     [createProfile],
@@ -246,6 +254,8 @@ export default function App() {
       selectProfile(profileId);
       setSelectedLeafId(null);
       setActiveLesson(null);
+      setIsChallengeOpen(false);
+      setIsRewardGameOpen(false);
       setIsParentMenuOpen(false);
     },
     [abortCurrentStream, selectProfile],
@@ -261,6 +271,7 @@ export default function App() {
   const handleLeafSelect = useCallback((leaf: LeafNode) => {
     setSelectedLeafId(leaf.id);
     setLessonError(null);
+    setIsRewardGameOpen(false);
   }, []);
 
   const handleReadToMe = useCallback(() => {
@@ -294,7 +305,6 @@ export default function App() {
       if (message.event === "token") {
         const payload = message.data as LessonStreamTokenEvent;
         setIsWaitingForFirstToken(false);
-        setShowWarmupGame(false);
         setActiveLesson((currentLesson) =>
           currentLesson
             ? {
@@ -310,7 +320,6 @@ export default function App() {
       if (message.event === "replace") {
         const payload = message.data as LessonStreamReplaceEvent;
         setIsWaitingForFirstToken(false);
-        setShowWarmupGame(false);
         setLessonError(payload.message ?? null);
         setActiveLesson((currentLesson) =>
           currentLesson
@@ -336,7 +345,6 @@ export default function App() {
           stream_model: payload.model,
           recovered: payload.recovered,
         });
-        void refreshTree();
         void refreshLessons();
         return;
       }
@@ -346,7 +354,7 @@ export default function App() {
         setLessonError(payload.message);
       }
     },
-    [refreshLessons, refreshTree],
+    [refreshLessons],
   );
 
   const startLessonForLeaf = useCallback(
@@ -364,7 +372,8 @@ export default function App() {
       setActiveLesson(createProvisionalLesson(leaf));
       setIsGeneratingLesson(true);
       setIsWaitingForFirstToken(true);
-      setWarmupSession((currentValue) => currentValue + 1);
+      setIsChallengeOpen(false);
+      setIsRewardGameOpen(false);
       setIsLessonReaderOpen(true);
 
       try {
@@ -396,7 +405,6 @@ export default function App() {
         }
         setIsGeneratingLesson(false);
         setIsWaitingForFirstToken(false);
-        setShowWarmupGame(false);
       }
     },
     [abortCurrentStream, applyStreamMessage, isGeneratingLesson, selectedProfileId],
@@ -468,6 +476,8 @@ export default function App() {
       recovered: false,
     });
     setSelectedLeafId(lesson.leaf_id);
+    setIsChallengeOpen(false);
+    setIsRewardGameOpen(false);
     setIsLessonReaderOpen(true);
     setIsParentMenuOpen(false);
   }, []);
@@ -480,13 +490,69 @@ export default function App() {
     [handleLeafSelect],
   );
 
+  const handleCompleteLesson = useCallback(() => {
+    if (!displayedLesson?.content.trim() || displayedLesson.id < 1) {
+      return;
+    }
+
+    setLessonError(null);
+    setIsChallengeOpen(true);
+  }, [displayedLesson]);
+
+  const handleChallengePass = useCallback(
+    async ({ correctCount, questionCount }: { correctCount: number; questionCount: number }) => {
+      if (selectedProfileId === null || !displayedLesson) {
+        return;
+      }
+
+      setIsCompletingLesson(true);
+      setLessonError(null);
+
+      try {
+        const response = await fetchJson<LessonCompletionResponse>(`/api/lessons/${displayedLesson.id}/complete`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            profile_id: selectedProfileId,
+            correct_count: correctCount,
+            question_count: questionCount,
+          }),
+        });
+
+        setActiveLesson((currentLesson) =>
+          currentLesson && currentLesson.id === response.lesson.id
+            ? {
+                ...response.lesson,
+                stream_state: "complete",
+                stream_model: currentLesson.stream_model ?? null,
+                recovered: currentLesson.recovered ?? false,
+              }
+            : currentLesson,
+        );
+        setIsChallengeOpen(false);
+        setRewardSession((currentValue) => currentValue + 1);
+        setIsRewardGameOpen(true);
+        await refreshLessons();
+        await refreshTree();
+      } catch (caughtError) {
+        const message = caughtError instanceof Error ? caughtError.message : "Unable to save lesson completion.";
+        setLessonError(message);
+      } finally {
+        setIsCompletingLesson(false);
+      }
+    },
+    [displayedLesson, refreshLessons, refreshTree, selectedProfileId],
+  );
+
   const closeLessonReader = useCallback(() => {
     if (isGeneratingLesson) {
       abortCurrentStream();
       setIsGeneratingLesson(false);
       setIsWaitingForFirstToken(false);
-      setShowWarmupGame(false);
     }
+    setIsChallengeOpen(false);
     setIsLessonReaderOpen(false);
   }, [abortCurrentStream, isGeneratingLesson]);
 
@@ -496,7 +562,8 @@ export default function App() {
     setLessonError(null);
     setIsGeneratingLesson(false);
     setIsWaitingForFirstToken(false);
-    setShowWarmupGame(false);
+    setIsChallengeOpen(false);
+    setIsRewardGameOpen(false);
     setIsLessonReaderOpen(false);
     stopSpeaking();
   }, [abortCurrentStream, stopSpeaking]);
@@ -510,27 +577,45 @@ export default function App() {
     setIsParentMenuOpen(false);
     setIsGeneratingLesson(false);
     setIsWaitingForFirstToken(false);
-    setShowWarmupGame(false);
+    setIsChallengeOpen(false);
+    setIsRewardGameOpen(false);
     stopSpeaking();
   }, [abortCurrentStream, stopSpeaking]);
 
   return (
     <>
-      <WarmupGameModal
-        isOpen={showWarmupGame}
-        sessionKey={warmupSession}
-        subject={selectedLeaf?.subjectTitle ?? selectedLeaf?.subjectKey ?? ""}
-        vocabularyWords={vocabularyPool}
+      <RewardGameModal
+        gradeTitle={displayedLesson?.grade_title ?? selectedLeaf?.gradeTitle ?? "Grade 1"}
+        isOpen={isRewardGameOpen}
+        onClose={() => setIsRewardGameOpen(false)}
         onSpeakText={speakText}
+        sessionKey={rewardSession}
+        subject={displayedLesson?.subject_title ?? selectedLeaf?.subjectTitle ?? selectedLeaf?.subjectKey ?? ""}
+        vocabularyWords={displayedLesson?.vocabulary_words ?? vocabularyPool}
       />
 
-      <LessonReader
+      <LessonChallengeModal
+        isOpen={isChallengeOpen}
+        isSubmitting={isCompletingLesson}
         lesson={displayedLesson}
-        isOpen={isLessonReaderOpen}
-        isWaitingForFirstToken={isWaitingForFirstToken}
-        onClose={closeLessonReader}
-        onSpeakText={speakText}
+        onClose={() => setIsChallengeOpen(false)}
+        onPass={handleChallengePass}
       />
+
+        <LessonReader
+          lesson={displayedLesson}
+          isCompletingLesson={isCompletingLesson}
+          isLessonCompleted={Boolean(displayedLesson?.is_completed)}
+          isOpen={isLessonReaderOpen}
+          isWaitingForFirstToken={isWaitingForFirstToken}
+          onClose={closeLessonReader}
+          onCompleteLesson={handleCompleteLesson}
+          onPlayRewardGame={() => {
+            setRewardSession((currentValue) => currentValue + 1);
+            setIsRewardGameOpen(true);
+          }}
+          onSpeakText={speakText}
+        />
 
       {showProfileGate ? (
         <main className="app-shell">
