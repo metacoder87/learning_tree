@@ -70,6 +70,12 @@ class LessonStreamRequest(BaseModel):
     leaf_id: int
 
 
+class LessonCompletionRequest(BaseModel):
+    profile_id: int
+    correct_count: int = Field(ge=0)
+    question_count: int = Field(gt=0)
+
+
 class LeafGenerationRequest(BaseModel):
     grade: str = Field(min_length=1, max_length=50)
     subject: str = Field(min_length=1, max_length=80)
@@ -103,9 +109,20 @@ class LessonHistoryItemRead(BaseModel):
     title: str
     content: str
     vocabulary_words: list[str] = Field(min_length=5, max_length=5)
+    is_completed: bool = False
+    challenge_score: int | None = None
+    challenge_total: int | None = None
+    completed_at: datetime | None = None
     created_at: datetime
 
 
 class LessonHistoryRead(BaseModel):
     profile_id: int
     lessons: list[LessonHistoryItemRead]
+
+
+class LessonCompletionResponse(BaseModel):
+    lesson: LessonHistoryItemRead
+    mastery_level: int
+    lessons_completed: int
+    completed_now: bool

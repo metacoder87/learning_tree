@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS lessons (
     body_text TEXT NOT NULL,
     vocabulary_words_json TEXT NOT NULL,
     raw_payload_json TEXT NOT NULL,
+    is_completed INTEGER NOT NULL DEFAULT 0,
+    challenge_score INTEGER,
+    challenge_total INTEGER,
+    completed_at DATETIME,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (profile_id) REFERENCES profiles (id) ON DELETE CASCADE,
     FOREIGN KEY (leaf_id) REFERENCES leaves (id) ON DELETE CASCADE

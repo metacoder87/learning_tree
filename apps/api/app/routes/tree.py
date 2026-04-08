@@ -16,6 +16,8 @@ from app.schemas.tree import (
     GradeRead,
     LeafGenerationRequest,
     LeafGenerationResponse,
+    LessonCompletionRequest,
+    LessonCompletionResponse,
     LessonHistoryItemRead,
     LessonHistoryRead,
     LessonStreamRequest,
@@ -164,6 +166,38 @@ def read_profile_lessons(profile_id: int, limit: int = 12, db: Session = Depends
 
     lessons = [build_lesson_history_item(lesson) for lesson in lesson_rows]
     return LessonHistoryRead(profile_id=profile_id, lessons=lessons)
+
+
+@router.post("/lessons/{lesson_id}/complete", response_model=LessonCompletionResponse)
+def complete_lesson(lesson_id: int, payload: LessonCompletionRequest, db: Session = Depends(get_db)):
+    lesson = (
+        db.execute(
+            select(Lesson)
+            .where(Lesson.id == lesson_id, Lesson.profile_id == payload.profile_id)
+            .options(joinedload(Lesson.leaf).joinedload(Leaf.branch).joinedload(SubjectBranch.grade_level))
+        )
+        .scalars()
+        .first()
+    )
+    if lesson is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lesson not found for this profile")
+
+    if payload.correct_count > payload.question_count:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Correct count cannot exceed question count")
+
+    completed_now, progress_row = apply_lesson_completion(
+        lesson=lesson,
+        correct_count=payload.correct_count,
+        question_count=payload.question_count,
+        db=db,
+    )
+
+    return LessonCompletionResponse(
+        lesson=build_lesson_history_item(lesson),
+        mastery_level=progress_row.mastery_level,
+        lessons_completed=progress_row.lessons_completed,
+        completed_now=completed_now,
+    )
 
 
 @router.post("/generate-lesson/stream")
@@ -362,34 +396,9 @@ def save_generated_lesson(
         body_text=lesson.content,
         vocabulary_words_json=json.dumps(lesson.vocabulary_words, ensure_ascii=False),
         raw_payload_json=raw_payload_json,
+        is_completed=False,
     )
     db.add(lesson_row)
-    db.flush()
-
-    progress_row = db.execute(
-        select(ProfileLeafProgress).where(
-            ProfileLeafProgress.profile_id == profile_id,
-            ProfileLeafProgress.leaf_id == leaf.id,
-        )
-    ).scalar_one_or_none()
-
-    now = datetime.now(UTC).replace(tzinfo=None)
-    if progress_row is None:
-        progress_row = ProfileLeafProgress(
-            profile_id=profile_id,
-            leaf_id=leaf.id,
-            lessons_completed=0,
-            mastery_level=0,
-        )
-        db.add(progress_row)
-
-    progress_row.lessons_completed += 1
-    progress_row.mastery_level = min(progress_row.lessons_completed, 5)
-    progress_row.last_lesson_id = lesson_row.id
-    progress_row.last_opened_at = now
-    if progress_row.mastery_level >= 5:
-        progress_row.completed_at = now
-
     db.commit()
     db.refresh(lesson_row)
 
@@ -402,8 +411,58 @@ def save_generated_lesson(
         title=lesson_row.lesson_title,
         content=lesson_row.body_text,
         vocabulary_words=json.loads(lesson_row.vocabulary_words_json),
+        is_completed=lesson_row.is_completed,
+        challenge_score=lesson_row.challenge_score,
+        challenge_total=lesson_row.challenge_total,
+        completed_at=lesson_row.completed_at,
         created_at=lesson_row.created_at,
     )
+
+
+def apply_lesson_completion(
+    *,
+    lesson: Lesson,
+    correct_count: int,
+    question_count: int,
+    db: Session,
+) -> tuple[bool, ProfileLeafProgress]:
+    progress_row = db.execute(
+        select(ProfileLeafProgress).where(
+            ProfileLeafProgress.profile_id == lesson.profile_id,
+            ProfileLeafProgress.leaf_id == lesson.leaf_id,
+        )
+    ).scalar_one_or_none()
+
+    if progress_row is None:
+        progress_row = ProfileLeafProgress(
+            profile_id=lesson.profile_id,
+            leaf_id=lesson.leaf_id,
+            lessons_completed=0,
+            mastery_level=0,
+        )
+        db.add(progress_row)
+        db.flush()
+
+    completed_now = not lesson.is_completed
+    now = datetime.now(UTC).replace(tzinfo=None)
+
+    lesson.challenge_score = correct_count
+    lesson.challenge_total = question_count
+
+    if completed_now:
+        lesson.is_completed = True
+        lesson.completed_at = now
+        progress_row.lessons_completed += 1
+        progress_row.mastery_level = min(progress_row.lessons_completed, 5)
+        progress_row.last_lesson_id = lesson.id
+        progress_row.last_opened_at = now
+        if progress_row.mastery_level >= 5:
+            progress_row.completed_at = now
+
+    db.commit()
+    db.refresh(lesson)
+    db.refresh(progress_row)
+    return completed_now, progress_row
 
 
 def build_lesson_history_item(lesson: Lesson) -> LessonHistoryItemRead:
@@ -416,6 +475,10 @@ def build_lesson_history_item(lesson: Lesson) -> LessonHistoryItemRead:
         title=lesson.lesson_title,
         content=lesson.body_text,
         vocabulary_words=json.loads(lesson.vocabulary_words_json),
+        is_completed=lesson.is_completed,
+        challenge_score=lesson.challenge_score,
+        challenge_total=lesson.challenge_total,
+        completed_at=lesson.completed_at,
         created_at=lesson.created_at,
     )
 

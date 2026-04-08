@@ -95,6 +95,10 @@ class Lesson(Base):
     body_text: Mapped[str] = mapped_column(Text, nullable=False)
     vocabulary_words_json: Mapped[str] = mapped_column(Text, nullable=False)
     raw_payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    is_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    challenge_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    challenge_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.current_timestamp(), nullable=False)
 
     profile: Mapped["Profile"] = relationship(back_populates="lessons")
@@ -122,4 +126,3 @@ class ProfileLeafProgress(Base):
     profile: Mapped["Profile"] = relationship(back_populates="progress_rows")
     leaf: Mapped["Leaf"] = relationship(back_populates="progress_rows")
     last_lesson: Mapped["Lesson | None"] = relationship(back_populates="progress_rows")
-
