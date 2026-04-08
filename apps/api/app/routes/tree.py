@@ -1,0 +1,460 @@
+import json
+import re
+from datetime import UTC, datetime
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
+from sqlalchemy import select
+from sqlalchemy.orm import Session, joinedload, selectinload
+
+from app.db.models import GradeLevel, Leaf, Lesson, Profile, ProfileLeafProgress, SubjectBranch
+from app.db.session import SessionLocal, get_db
+from app.schemas.tree import (
+    BranchRead,
+    GeneratedLeafRead,
+    GradeRead,
+    LeafGenerationRequest,
+    LeafGenerationResponse,
+    LessonHistoryItemRead,
+    LessonHistoryRead,
+    LessonStreamRequest,
+    ProfileCreate,
+    ProfileRead,
+    ProfileSummaryRead,
+    TreeSnapshotRead,
+)
+from app.services.ai_health import check_ai_health
+from app.services.lesson_engine import (
+    GeneratedLesson,
+    LessonEngineError,
+    LeafGenerationContext,
+    build_fallback_lesson,
+    build_generated_lesson,
+    generate_subtopics_direct,
+    pick_lesson_models,
+    resolve_lesson_context,
+    stream_lesson_markdown,
+)
+from app.services.tree_layout import compute_leaf_position, slugify_token
+
+
+router = APIRouter(prefix="/api", tags=["tree"])
+
+
+@router.get("/health")
+def healthcheck():
+    return {"status": "ok"}
+
+
+@router.get("/health/ai")
+def ai_healthcheck():
+    return check_ai_health()
+
+
+@router.post("/profiles", response_model=ProfileRead, status_code=status.HTTP_201_CREATED)
+def create_profile(payload: ProfileCreate, db: Session = Depends(get_db)):
+    profile = Profile(
+        display_name=payload.display_name,
+        avatar_seed=payload.avatar_seed,
+        age_band=payload.age_band,
+    )
+    db.add(profile)
+    db.commit()
+    db.refresh(profile)
+    return profile
+
+
+@router.get("/profiles", response_model=list[ProfileSummaryRead])
+def list_profiles(db: Session = Depends(get_db)):
+    profiles = db.execute(select(Profile).order_by(Profile.created_at, Profile.id)).scalars().all()
+    return [ProfileSummaryRead.model_validate(profile) for profile in profiles]
+
+
+@router.get("/tree", response_model=TreeSnapshotRead)
+def read_tree(profile_id: int | None = None, db: Session = Depends(get_db)):
+    grade_levels = (
+        db.execute(
+            select(GradeLevel)
+            .options(selectinload(GradeLevel.branches).selectinload(SubjectBranch.leaves))
+            .order_by(GradeLevel.sort_order)
+        )
+        .scalars()
+        .all()
+    )
+
+    progress_by_leaf: dict[int, int] = {}
+    if profile_id is not None:
+        progress_rows = (
+            db.execute(
+                select(ProfileLeafProgress)
+                .where(ProfileLeafProgress.profile_id == profile_id)
+            )
+            .scalars()
+            .all()
+        )
+        progress_by_leaf = {row.leaf_id: row.mastery_level for row in progress_rows}
+
+    grades: list[GradeRead] = []
+    for grade in grade_levels:
+        branches: list[BranchRead] = []
+        for branch in sorted(grade.branches, key=lambda item: item.sort_order):
+            leaves = [
+                {
+                    "id": leaf.id,
+                    "title": leaf.title,
+                    "subtopic_key": leaf.subtopic_key,
+                    "description": leaf.description,
+                    "leaf_x": leaf.leaf_x,
+                    "leaf_y": leaf.leaf_y,
+                    "render_radius": leaf.render_radius,
+                    "hit_radius": leaf.hit_radius,
+                    "mastery_level": progress_by_leaf.get(leaf.id, 0),
+                }
+                for leaf in sorted(branch.leaves, key=lambda item: item.unlock_order)
+            ]
+            branches.append(
+                BranchRead(
+                    id=branch.id,
+                    subject_key=branch.subject_key,
+                    title=branch.title,
+                    color_hex=branch.color_hex,
+                    anchor_x=branch.anchor_x,
+                    anchor_y=branch.anchor_y,
+                    canopy_width=branch.canopy_width,
+                    canopy_height=branch.canopy_height,
+                    leaves=leaves,
+                )
+            )
+
+        grades.append(
+            GradeRead(
+                id=grade.id,
+                grade_code=grade.grade_code,
+                title=grade.title,
+                sort_order=grade.sort_order,
+                branches=branches,
+            )
+        )
+
+    return TreeSnapshotRead(profile_id=profile_id, grades=grades)
+
+
+@router.get("/profiles/{profile_id}/lessons", response_model=LessonHistoryRead)
+def read_profile_lessons(profile_id: int, limit: int = 12, db: Session = Depends(get_db)):
+    profile = db.get(Profile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
+
+    lesson_rows = (
+        db.execute(
+            select(Lesson)
+            .join(Lesson.leaf)
+            .join(Leaf.branch)
+            .join(SubjectBranch.grade_level)
+            .options(joinedload(Lesson.leaf).joinedload(Leaf.branch).joinedload(SubjectBranch.grade_level))
+            .where(Lesson.profile_id == profile_id)
+            .order_by(Lesson.created_at.desc(), Lesson.id.desc())
+            .limit(limit)
+        )
+        .scalars()
+        .unique()
+        .all()
+    )
+
+    lessons = [build_lesson_history_item(lesson) for lesson in lesson_rows]
+    return LessonHistoryRead(profile_id=profile_id, lessons=lessons)
+
+
+@router.post("/generate-lesson/stream")
+def generate_lesson_stream(payload: LessonStreamRequest, db: Session = Depends(get_db)):
+    try:
+        context = resolve_lesson_context(payload.profile_id, payload.leaf_id, db)
+    except LessonEngineError as exc:
+        detail = str(exc)
+        status_code = status.HTTP_404_NOT_FOUND if "not found" in detail.lower() else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+
+    primary_model, _fallback_model = pick_lesson_models(context)
+
+    def event_stream():
+        emitted_any_tokens = False
+        streamed_parts: list[str] = []
+        selected_model = primary_model
+        recovery_detail: str | None = None
+        recovered = False
+
+        yield sse_event(
+            "start",
+            {
+                "profile_id": context.profile_id,
+                "leaf_id": context.leaf_id,
+                "title": context.leaf_title,
+                "grade_title": context.grade_title,
+                "subject_title": context.subject_title,
+            },
+        )
+
+        try:
+            for model_name, chunk in stream_lesson_markdown(context):
+                selected_model = model_name
+                streamed_parts.append(chunk)
+                if chunk:
+                    emitted_any_tokens = True
+                    yield sse_event("token", {"text": chunk})
+
+            lesson = build_generated_lesson(context, "".join(streamed_parts))
+        except Exception as exc:  # noqa: BLE001
+            recovered = True
+            recovery_detail = str(exc)
+            lesson = build_fallback_lesson(context)
+
+            if emitted_any_tokens:
+                yield sse_event(
+                    "replace",
+                    {
+                        "title": lesson.title,
+                        "content": lesson.content,
+                        "vocabulary_words": lesson.vocabulary_words,
+                        "message": "The live lesson stream stumbled, so a local fallback lesson was loaded.",
+                    },
+                )
+            else:
+                yield sse_event("token", {"text": lesson.content})
+
+        try:
+            with SessionLocal() as session:
+                saved_lesson = save_generated_lesson(
+                    profile_id=context.profile_id,
+                    leaf_id=context.leaf_id,
+                    lesson=lesson,
+                    db=session,
+                    raw_payload_json=json.dumps(
+                        {
+                            "model": selected_model,
+                            "content": lesson.content,
+                            "vocabulary_words": lesson.vocabulary_words,
+                            "recovered": recovered,
+                            "recovery_detail": recovery_detail,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+        except Exception as exc:  # noqa: BLE001
+            yield sse_event(
+                "error",
+                {
+                    "message": f"Lesson generated but could not be saved locally: {exc}",
+                },
+            )
+            return
+
+        yield sse_event(
+            "complete",
+            {
+                "lesson": saved_lesson.model_dump(mode="json"),
+                "recovered": recovered,
+                "model": selected_model,
+                "detail": recovery_detail,
+            },
+        )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/branches/generate-leaves", response_model=LeafGenerationResponse, status_code=status.HTTP_201_CREATED)
+def generate_branch_leaves(payload: LeafGenerationRequest, db: Session = Depends(get_db)):
+    branch = resolve_branch(payload.grade, payload.subject, db)
+    if branch is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Branch not found for the provided grade and subject")
+
+    existing_leaf_titles = [leaf.title for leaf in sorted(branch.leaves, key=lambda item: item.unlock_order)]
+    generation_context = LeafGenerationContext(
+        grade=branch.grade_level.title,
+        subject=branch.title,
+        existing_subtopics=existing_leaf_titles,
+        count=payload.count,
+    )
+    suggestions = generate_subtopics_direct(generation_context)
+
+    next_unlock_order = max((leaf.unlock_order for leaf in branch.leaves), default=-1) + 1
+    created_leaves: list[Leaf] = []
+
+    for suggestion in suggestions:
+        subtopic_key = slugify_token(suggestion.title)
+        if any(existing_leaf.subtopic_key == subtopic_key for existing_leaf in branch.leaves):
+            continue
+
+        leaf_x, leaf_y = compute_leaf_position(branch, next_unlock_order)
+        leaf = Leaf(
+            branch_id=branch.id,
+            subtopic_key=subtopic_key,
+            title=suggestion.title,
+            description=suggestion.description,
+            lesson_seed_prompt=f"Teach {suggestion.title} in {branch.title} for {branch.grade_level.title}.",
+            leaf_x=leaf_x,
+            leaf_y=leaf_y,
+            render_radius=28.0,
+            hit_radius=56.0,
+            unlock_order=next_unlock_order,
+        )
+        db.add(leaf)
+        created_leaves.append(leaf)
+        next_unlock_order += 1
+
+    db.commit()
+
+    for leaf in created_leaves:
+        db.refresh(leaf)
+
+    return LeafGenerationResponse(
+        grade=branch.grade_level.title,
+        subject=branch.title,
+        generated_count=len(created_leaves),
+        leaves=[
+            GeneratedLeafRead(
+                id=leaf.id,
+                title=leaf.title,
+                subtopic_key=leaf.subtopic_key,
+                description=leaf.description,
+                leaf_x=leaf.leaf_x,
+                leaf_y=leaf.leaf_y,
+                render_radius=leaf.render_radius,
+                hit_radius=leaf.hit_radius,
+            )
+            for leaf in created_leaves
+        ],
+    )
+
+
+def save_generated_lesson(
+    *,
+    profile_id: int,
+    leaf_id: int,
+    lesson: GeneratedLesson,
+    db: Session,
+    raw_payload_json: str,
+) -> LessonHistoryItemRead:
+    leaf = (
+        db.execute(
+            select(Leaf)
+            .where(Leaf.id == leaf_id)
+            .options(joinedload(Leaf.branch).joinedload(SubjectBranch.grade_level))
+        )
+        .scalars()
+        .first()
+    )
+    if leaf is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Leaf not found for saving lesson")
+
+    lesson_row = Lesson(
+        profile_id=profile_id,
+        leaf_id=leaf.id,
+        lesson_title=lesson.title,
+        body_text=lesson.content,
+        vocabulary_words_json=json.dumps(lesson.vocabulary_words, ensure_ascii=False),
+        raw_payload_json=raw_payload_json,
+    )
+    db.add(lesson_row)
+    db.flush()
+
+    progress_row = db.execute(
+        select(ProfileLeafProgress).where(
+            ProfileLeafProgress.profile_id == profile_id,
+            ProfileLeafProgress.leaf_id == leaf.id,
+        )
+    ).scalar_one_or_none()
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    if progress_row is None:
+        progress_row = ProfileLeafProgress(
+            profile_id=profile_id,
+            leaf_id=leaf.id,
+            lessons_completed=0,
+            mastery_level=0,
+        )
+        db.add(progress_row)
+
+    progress_row.lessons_completed += 1
+    progress_row.mastery_level = min(progress_row.lessons_completed, 5)
+    progress_row.last_lesson_id = lesson_row.id
+    progress_row.last_opened_at = now
+    if progress_row.mastery_level >= 5:
+        progress_row.completed_at = now
+
+    db.commit()
+    db.refresh(lesson_row)
+
+    return LessonHistoryItemRead(
+        id=lesson_row.id,
+        leaf_id=leaf.id,
+        leaf_title=leaf.title,
+        subject_title=leaf.branch.title,
+        grade_title=leaf.branch.grade_level.title,
+        title=lesson_row.lesson_title,
+        content=lesson_row.body_text,
+        vocabulary_words=json.loads(lesson_row.vocabulary_words_json),
+        created_at=lesson_row.created_at,
+    )
+
+
+def build_lesson_history_item(lesson: Lesson) -> LessonHistoryItemRead:
+    return LessonHistoryItemRead(
+        id=lesson.id,
+        leaf_id=lesson.leaf_id,
+        leaf_title=lesson.leaf.title,
+        subject_title=lesson.leaf.branch.title,
+        grade_title=lesson.leaf.branch.grade_level.title,
+        title=lesson.lesson_title,
+        content=lesson.body_text,
+        vocabulary_words=json.loads(lesson.vocabulary_words_json),
+        created_at=lesson.created_at,
+    )
+
+
+def sse_event(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def resolve_branch(grade: str, subject: str, db: Session) -> SubjectBranch | None:
+    grade_key = normalize_lookup_token(grade)
+    subject_key = normalize_lookup_token(subject)
+
+    branches = (
+        db.execute(
+            select(SubjectBranch)
+            .join(SubjectBranch.grade_level)
+            .options(joinedload(SubjectBranch.grade_level), selectinload(SubjectBranch.leaves))
+        )
+        .scalars()
+        .unique()
+        .all()
+    )
+
+    for branch in branches:
+        grade_matches = {
+            normalize_lookup_token(branch.grade_level.grade_code),
+            normalize_lookup_token(branch.grade_level.title),
+        }
+        subject_matches = {
+            normalize_lookup_token(branch.subject_key),
+            normalize_lookup_token(branch.title),
+        }
+
+        if grade_key in grade_matches and subject_key in subject_matches:
+            return branch
+
+    return None
+
+
+def normalize_lookup_token(value: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", "-", value.strip().lower())
+    return cleaned.strip("-")
