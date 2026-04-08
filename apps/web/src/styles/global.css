@@ -590,9 +590,11 @@ input:focus-visible {
   min-width: 220px;
   max-width: min(92vw, 420px);
   padding: 14px 18px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.88);
-  box-shadow: 0 18px 36px rgba(36, 72, 26, 0.16);
+  border-radius: 24px 24px 24px 10px;
+  background:
+    radial-gradient(circle at top, rgba(255, 247, 176, 0.78), transparent 46%),
+    linear-gradient(180deg, rgba(255, 252, 240, 0.94) 0%, rgba(239, 255, 218, 0.94) 100%);
+  box-shadow: 0 18px 36px rgba(36, 72, 26, 0.18);
   color: #2a4620;
   font-weight: 800;
   text-align: center;
@@ -618,11 +620,13 @@ input:focus-visible {
 .current-leaf-card {
   position: relative;
   padding: 22px 22px 20px;
-  border-radius: 30px;
+  border-radius: 34px 34px 34px 16px;
   background:
-    radial-gradient(circle at top, rgba(255, 248, 191, 0.72), transparent 40%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.93) 0%, rgba(241, 255, 220, 0.93) 100%);
-  box-shadow: 0 24px 56px rgba(31, 62, 22, 0.2);
+    radial-gradient(circle at top, rgba(255, 244, 170, 0.86), transparent 38%),
+    radial-gradient(circle at 90% 100%, rgba(149, 208, 103, 0.18), transparent 26%),
+    linear-gradient(180deg, rgba(255, 251, 241, 0.96) 0%, rgba(236, 252, 215, 0.95) 100%);
+  border: 1px solid rgba(110, 151, 69, 0.14);
+  box-shadow: 0 26px 64px rgba(31, 62, 22, 0.22);
   display: grid;
   gap: 14px;
   pointer-events: auto;
@@ -633,14 +637,15 @@ input:focus-visible {
   margin: 0;
   padding-right: 56px;
   font-size: clamp(1.9rem, 4vw, 2.8rem);
-  line-height: 0.98;
+  line-height: 1;
   color: #22411c;
+  text-wrap: balance;
 }
 
 .current-leaf-copy {
   margin: 0;
-  font-size: 1rem;
-  line-height: 1.55;
+  font-size: 1.02rem;
+  line-height: 1.62;
   color: #2f4a29;
 }
 
@@ -654,6 +659,12 @@ input:focus-visible {
   position: absolute;
   top: 16px;
   right: 16px;
+  min-width: 52px;
+  min-height: 52px;
+  border-radius: 18px;
+  background: linear-gradient(180deg, #fdf5d1 0%, #f2df9d 100%);
+  color: #5a4a23;
+  font-weight: 900;
 }
 
 .warmup-modal {
