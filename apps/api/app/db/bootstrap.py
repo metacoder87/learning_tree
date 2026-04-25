@@ -119,14 +119,50 @@ DEFAULT_LEAF_LIBRARY = {
 def init_database() -> None:
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as session:
-        apply_runtime_migrations(session)
+        apply_migrations(session)
         seed_grade_levels(session)
         seed_subject_branches(session)
         seed_leaves(session)
         session.commit()
 
 
-def apply_runtime_migrations(session: Session) -> None:
+def apply_migrations(session: Session) -> None:
+    session.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                id TEXT PRIMARY KEY,
+                applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+    apply_lesson_completion_migration(session)
+    session.flush()
+
+
+def is_migration_applied(session: Session, migration_id: str) -> bool:
+    return (
+        session.execute(
+            text("SELECT 1 FROM schema_migrations WHERE id = :migration_id"),
+            {"migration_id": migration_id},
+        ).first()
+        is not None
+    )
+
+
+def mark_migration_applied(session: Session, migration_id: str) -> None:
+    session.execute(
+        text("INSERT OR IGNORE INTO schema_migrations (id) VALUES (:migration_id)"),
+        {"migration_id": migration_id},
+    )
+
+
+def apply_lesson_completion_migration(session: Session) -> None:
+    migration_id = "20260424_0001_lesson_completion_state"
+    if is_migration_applied(session, migration_id):
+        return
+
     lesson_columns = {
         row[1]
         for row in session.execute(text("PRAGMA table_info(lessons)")).all()
@@ -141,7 +177,7 @@ def apply_runtime_migrations(session: Session) -> None:
     if "completed_at" not in lesson_columns:
         session.execute(text("ALTER TABLE lessons ADD COLUMN completed_at DATETIME"))
 
-    session.flush()
+    mark_migration_applied(session, migration_id)
 
 
 def seed_grade_levels(session: Session) -> None:
@@ -187,6 +223,7 @@ def seed_subject_branches(session: Session) -> None:
                     path_points_json=None,
                 )
             )
+    session.flush()
 
 
 def seed_leaves(session: Session) -> None:
