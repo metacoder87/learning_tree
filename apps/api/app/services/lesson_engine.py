@@ -15,6 +15,14 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.core.config import settings
 from app.db.models import Leaf, Lesson, Profile, ProfileLeafProgress, SubjectBranch
+from app.schemas.learning import LessonPackage
+from app.services.curriculum import (
+    build_lesson_package,
+    fallback_curriculum_spec,
+    find_curriculum_spec,
+    render_lesson_package_markdown,
+    vocabulary_words_from_package,
+)
 
 
 class LessonEngineError(RuntimeError):
@@ -105,6 +113,7 @@ class LessonGenerationContext:
     age_band: str | None
     leaf_id: int
     leaf_title: str
+    subtopic_key: str
     leaf_description: str | None
     lesson_seed_prompt: str | None
     grade_code: str
@@ -270,6 +279,7 @@ def resolve_lesson_context(profile_id: int, leaf_id: int, db: Session) -> Lesson
         age_band=profile.age_band,
         leaf_id=leaf.id,
         leaf_title=leaf.title,
+        subtopic_key=leaf.subtopic_key,
         leaf_description=leaf.description,
         lesson_seed_prompt=leaf.lesson_seed_prompt,
         grade_code=grade.grade_code,
@@ -404,6 +414,17 @@ def stream_lesson_markdown(context: LessonGenerationContext):
     raise LessonEngineError("No Ollama model was available for lesson generation.")
 
 
+def build_validated_lesson_package(context: LessonGenerationContext) -> LessonPackage:
+    spec = find_curriculum_spec(context)
+    generation_quality = "local_validated" if spec is not None else "legacy_review"
+    selected_spec = spec or fallback_curriculum_spec(context)
+    return build_lesson_package(
+        context=context,
+        spec=selected_spec,
+        generation_quality=generation_quality,
+    )
+
+
 def generate_subtopics_direct(context: LeafGenerationContext) -> list[GeneratedLeafSuggestion]:
     system_prompt = dedent(
         """
@@ -453,6 +474,14 @@ def build_generated_lesson(context: LessonGenerationContext, markdown_content: s
         title=context.leaf_title,
         content=content,
         vocabulary_words=extract_vocabulary_words(content, context),
+    )
+
+
+def build_generated_lesson_from_package(package: LessonPackage) -> GeneratedLesson:
+    return GeneratedLesson(
+        title=package.title,
+        content=render_lesson_package_markdown(package),
+        vocabulary_words=vocabulary_words_from_package(package),
     )
 
 

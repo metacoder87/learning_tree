@@ -1,12 +1,56 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.schemas.learning import LessonPackage, MasteryEvidence, QuizAnswerSubmission, QuizFeedback, QuizQuestion
+
+
+SUPPORTED_AGE_BANDS = {
+    "early-reader",
+    "elementary",
+    "middle-school",
+    "high-school",
+    "higher-ed",
+    "college",
+    "research",
+    "phd",
+}
 
 
 class ProfileCreate(BaseModel):
     display_name: str = Field(min_length=1, max_length=100)
     avatar_seed: str | None = None
     age_band: str | None = None
+
+    @field_validator("display_name")
+    @classmethod
+    def validate_display_name(cls, value: str) -> str:
+        cleaned = " ".join(value.strip().split())
+        if not cleaned:
+            raise ValueError("Profile name must not be blank.")
+        return cleaned
+
+    @field_validator("avatar_seed")
+    @classmethod
+    def validate_avatar_seed(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        cleaned = " ".join(value.strip().split())
+        return cleaned or None
+
+    @field_validator("age_band")
+    @classmethod
+    def validate_age_band(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        cleaned = value.strip().lower()
+        if not cleaned:
+            return None
+        if cleaned not in SUPPORTED_AGE_BANDS:
+            raise ValueError(f"Age band must be one of: {', '.join(sorted(SUPPORTED_AGE_BANDS))}.")
+        return cleaned
 
 
 class ProfileRead(BaseModel):
@@ -66,20 +110,41 @@ class TreeSnapshotRead(BaseModel):
 
 
 class LessonStreamRequest(BaseModel):
-    profile_id: int
-    leaf_id: int
+    profile_id: int = Field(gt=0)
+    leaf_id: int = Field(gt=0)
 
 
 class LessonCompletionRequest(BaseModel):
-    profile_id: int
-    correct_count: int = Field(ge=0)
-    question_count: int = Field(gt=0)
+    profile_id: int = Field(gt=0)
+    correct_count: int | None = Field(default=None, ge=0)
+    question_count: int | None = Field(default=None, gt=0)
+    answers: list[QuizAnswerSubmission] | None = None
+
+    @model_validator(mode="after")
+    def validate_completion_payload(self) -> "LessonCompletionRequest":
+        has_legacy_score = self.correct_count is not None or self.question_count is not None
+        has_answers = self.answers is not None
+        if not has_answers and not has_legacy_score:
+            raise ValueError("Provide quiz answers or a legacy score.")
+        if has_legacy_score and (self.correct_count is None or self.question_count is None):
+            raise ValueError("Legacy completion requires correct_count and question_count.")
+        if self.correct_count is not None and self.question_count is not None and self.correct_count > self.question_count:
+            raise ValueError("Correct count cannot exceed question count.")
+        return self
 
 
 class LeafGenerationRequest(BaseModel):
     grade: str = Field(min_length=1, max_length=50)
     subject: str = Field(min_length=1, max_length=80)
     count: int = Field(default=3, ge=1, le=6)
+
+    @field_validator("grade", "subject")
+    @classmethod
+    def validate_lookup_text(cls, value: str) -> str:
+        cleaned = " ".join(value.strip().split())
+        if not cleaned:
+            raise ValueError("Lookup text must not be blank.")
+        return cleaned
 
 
 class GeneratedLeafRead(BaseModel):
@@ -114,6 +179,14 @@ class LessonHistoryItemRead(BaseModel):
     challenge_total: int | None = None
     completed_at: datetime | None = None
     created_at: datetime
+    recovered: bool = False
+    recovery_detail: str | None = None
+    stream_model: str | None = None
+    lesson_package: LessonPackage | None = None
+    quiz: list[QuizQuestion] | None = None
+    mastery_evidence: MasteryEvidence | None = None
+    curriculum_spec_id: str | None = None
+    generation_quality: str | None = None
 
 
 class LessonHistoryRead(BaseModel):
@@ -126,3 +199,8 @@ class LessonCompletionResponse(BaseModel):
     mastery_level: int
     lessons_completed: int
     completed_now: bool
+    score: int
+    total: int
+    passed: bool
+    passing_score: int
+    feedback: list[QuizFeedback] = []

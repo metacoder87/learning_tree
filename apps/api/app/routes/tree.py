@@ -3,7 +3,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -26,17 +26,26 @@ from app.schemas.tree import (
     ProfileSummaryRead,
     TreeSnapshotRead,
 )
+from app.schemas.learning import (
+    LessonPackage,
+    MasteryEvidence,
+    QuizFeedback,
+    QuizQuestion,
+    QuizScoreResult,
+    passing_score_for_tier,
+    score_quiz_answers,
+)
 from app.services.ai_health import check_ai_health
+from app.services.curriculum import tier_for_grade_sort_order
 from app.services.lesson_engine import (
     GeneratedLesson,
     LessonEngineError,
     LeafGenerationContext,
-    build_fallback_lesson,
-    build_generated_lesson,
+    build_generated_lesson_from_package,
+    build_validated_lesson_package,
     generate_subtopics_direct,
     pick_lesson_models,
     resolve_lesson_context,
-    stream_lesson_markdown,
 )
 from app.services.tree_layout import compute_leaf_position, slugify_token
 
@@ -74,7 +83,7 @@ def list_profiles(db: Session = Depends(get_db)):
 
 
 @router.get("/tree", response_model=TreeSnapshotRead)
-def read_tree(profile_id: int | None = None, db: Session = Depends(get_db)):
+def read_tree(profile_id: int | None = Query(default=None, gt=0), db: Session = Depends(get_db)):
     grade_levels = (
         db.execute(
             select(GradeLevel)
@@ -87,6 +96,9 @@ def read_tree(profile_id: int | None = None, db: Session = Depends(get_db)):
 
     progress_by_leaf: dict[int, int] = {}
     if profile_id is not None:
+        if db.get(Profile, profile_id) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
+
         progress_rows = (
             db.execute(
                 select(ProfileLeafProgress)
@@ -143,7 +155,11 @@ def read_tree(profile_id: int | None = None, db: Session = Depends(get_db)):
 
 
 @router.get("/profiles/{profile_id}/lessons", response_model=LessonHistoryRead)
-def read_profile_lessons(profile_id: int, limit: int = 12, db: Session = Depends(get_db)):
+def read_profile_lessons(
+    profile_id: int,
+    limit: int = Query(default=12, ge=1, le=50),
+    db: Session = Depends(get_db),
+):
     profile = db.get(Profile, profile_id)
     if profile is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
@@ -182,13 +198,13 @@ def complete_lesson(lesson_id: int, payload: LessonCompletionRequest, db: Sessio
     if lesson is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lesson not found for this profile")
 
-    if payload.correct_count > payload.question_count:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Correct count cannot exceed question count")
+    quiz_result = score_completion_attempt(lesson, payload)
 
     completed_now, progress_row = apply_lesson_completion(
         lesson=lesson,
-        correct_count=payload.correct_count,
-        question_count=payload.question_count,
+        correct_count=quiz_result.correct_count,
+        question_count=quiz_result.question_count,
+        should_complete=quiz_result.passed,
         db=db,
     )
 
@@ -197,6 +213,11 @@ def complete_lesson(lesson_id: int, payload: LessonCompletionRequest, db: Sessio
         mastery_level=progress_row.mastery_level,
         lessons_completed=progress_row.lessons_completed,
         completed_now=completed_now,
+        score=quiz_result.correct_count,
+        total=quiz_result.question_count,
+        passed=quiz_result.passed,
+        passing_score=quiz_result.passing_score,
+        feedback=quiz_result.feedback,
     )
 
 
@@ -212,8 +233,6 @@ def generate_lesson_stream(payload: LessonStreamRequest, db: Session = Depends(g
     primary_model, _fallback_model = pick_lesson_models(context)
 
     def event_stream():
-        emitted_any_tokens = False
-        streamed_parts: list[str] = []
         selected_model = primary_model
         recovery_detail: str | None = None
         recovered = False
@@ -230,31 +249,32 @@ def generate_lesson_stream(payload: LessonStreamRequest, db: Session = Depends(g
         )
 
         try:
-            for model_name, chunk in stream_lesson_markdown(context):
-                selected_model = model_name
-                streamed_parts.append(chunk)
-                if chunk:
-                    emitted_any_tokens = True
-                    yield sse_event("token", {"text": chunk})
-
-            lesson = build_generated_lesson(context, "".join(streamed_parts))
+            package = build_validated_lesson_package(context)
+            selected_model = "local-curriculum"
+            lesson = build_generated_lesson_from_package(package)
+            for chunk in lesson_stream_chunks(lesson.content):
+                yield sse_event("token", {"text": chunk})
         except Exception as exc:  # noqa: BLE001
             recovered = True
             recovery_detail = str(exc)
-            lesson = build_fallback_lesson(context)
+            package = build_validated_lesson_package(context)
+            selected_model = "local-curriculum"
+            lesson = build_generated_lesson_from_package(package)
 
-            if emitted_any_tokens:
-                yield sse_event(
-                    "replace",
-                    {
-                        "title": lesson.title,
-                        "content": lesson.content,
-                        "vocabulary_words": lesson.vocabulary_words,
-                        "message": "The live lesson stream stumbled, so a local fallback lesson was loaded.",
-                    },
-                )
-            else:
-                yield sse_event("token", {"text": lesson.content})
+            yield sse_event(
+                "replace",
+                {
+                    "title": lesson.title,
+                    "content": lesson.content,
+                    "vocabulary_words": lesson.vocabulary_words,
+                    "lesson_package": package.model_dump(mode="json"),
+                    "quiz": [question.model_dump(mode="json") for question in package.quiz],
+                    "mastery_evidence": package.mastery_evidence.model_dump(mode="json"),
+                    "curriculum_spec_id": package.curriculum_spec_id,
+                    "generation_quality": package.generation_quality,
+                    "message": "The live lesson stream stumbled, so a local fallback lesson was loaded.",
+                },
+            )
 
         try:
             with SessionLocal() as session:
@@ -268,6 +288,11 @@ def generate_lesson_stream(payload: LessonStreamRequest, db: Session = Depends(g
                             "model": selected_model,
                             "content": lesson.content,
                             "vocabulary_words": lesson.vocabulary_words,
+                            "lesson_package": package.model_dump(mode="json"),
+                            "quiz": [question.model_dump(mode="json") for question in package.quiz],
+                            "mastery_evidence": package.mastery_evidence.model_dump(mode="json"),
+                            "curriculum_spec_id": package.curriculum_spec_id,
+                            "generation_quality": package.generation_quality,
                             "recovered": recovered,
                             "recovery_detail": recovery_detail,
                         },
@@ -322,9 +347,11 @@ def generate_branch_leaves(payload: LeafGenerationRequest, db: Session = Depends
     next_unlock_order = max((leaf.unlock_order for leaf in branch.leaves), default=-1) + 1
     created_leaves: list[Leaf] = []
 
+    existing_subtopic_keys = {leaf.subtopic_key for leaf in branch.leaves}
+
     for suggestion in suggestions:
         subtopic_key = slugify_token(suggestion.title)
-        if any(existing_leaf.subtopic_key == subtopic_key for existing_leaf in branch.leaves):
+        if not subtopic_key or subtopic_key in existing_subtopic_keys:
             continue
 
         leaf_x, leaf_y = compute_leaf_position(branch, next_unlock_order)
@@ -342,6 +369,7 @@ def generate_branch_leaves(payload: LeafGenerationRequest, db: Session = Depends
         )
         db.add(leaf)
         created_leaves.append(leaf)
+        existing_subtopic_keys.add(subtopic_key)
         next_unlock_order += 1
 
     db.commit()
@@ -402,6 +430,7 @@ def save_generated_lesson(
     db.commit()
     db.refresh(lesson_row)
 
+    metadata = parse_lesson_metadata(lesson_row.raw_payload_json)
     return LessonHistoryItemRead(
         id=lesson_row.id,
         leaf_id=leaf.id,
@@ -416,6 +445,14 @@ def save_generated_lesson(
         challenge_total=lesson_row.challenge_total,
         completed_at=lesson_row.completed_at,
         created_at=lesson_row.created_at,
+        recovered=metadata["recovered"],
+        recovery_detail=metadata["recovery_detail"],
+        stream_model=metadata["stream_model"],
+        lesson_package=metadata["lesson_package"],
+        quiz=metadata["quiz"],
+        mastery_evidence=metadata["mastery_evidence"],
+        curriculum_spec_id=metadata["curriculum_spec_id"],
+        generation_quality=metadata["generation_quality"],
     )
 
 
@@ -424,6 +461,7 @@ def apply_lesson_completion(
     lesson: Lesson,
     correct_count: int,
     question_count: int,
+    should_complete: bool,
     db: Session,
 ) -> tuple[bool, ProfileLeafProgress]:
     progress_row = db.execute(
@@ -443,11 +481,15 @@ def apply_lesson_completion(
         db.add(progress_row)
         db.flush()
 
-    completed_now = not lesson.is_completed
+    completed_now = should_complete and not lesson.is_completed
     now = datetime.now(UTC).replace(tzinfo=None)
 
-    lesson.challenge_score = correct_count
-    lesson.challenge_total = question_count
+    if lesson.is_completed and lesson.challenge_score is not None and lesson.challenge_total is not None:
+        lesson.challenge_score = max(lesson.challenge_score, correct_count)
+        lesson.challenge_total = max(lesson.challenge_total, question_count)
+    else:
+        lesson.challenge_score = correct_count
+        lesson.challenge_total = question_count
 
     if completed_now:
         lesson.is_completed = True
@@ -466,6 +508,7 @@ def apply_lesson_completion(
 
 
 def build_lesson_history_item(lesson: Lesson) -> LessonHistoryItemRead:
+    metadata = parse_lesson_metadata(lesson.raw_payload_json)
     return LessonHistoryItemRead(
         id=lesson.id,
         leaf_id=lesson.leaf_id,
@@ -480,7 +523,90 @@ def build_lesson_history_item(lesson: Lesson) -> LessonHistoryItemRead:
         challenge_total=lesson.challenge_total,
         completed_at=lesson.completed_at,
         created_at=lesson.created_at,
+        recovered=metadata["recovered"],
+        recovery_detail=metadata["recovery_detail"],
+        stream_model=metadata["stream_model"],
+        lesson_package=metadata["lesson_package"],
+        quiz=metadata["quiz"],
+        mastery_evidence=metadata["mastery_evidence"],
+        curriculum_spec_id=metadata["curriculum_spec_id"],
+        generation_quality=metadata["generation_quality"],
     )
+
+
+def score_completion_attempt(lesson: Lesson, payload: LessonCompletionRequest) -> QuizScoreResult:
+    metadata = parse_lesson_metadata(lesson.raw_payload_json)
+    package = metadata["lesson_package"]
+    quiz = metadata["quiz"]
+
+    if payload.answers is not None and package is not None and quiz is not None:
+        return score_quiz_answers(quiz=quiz, submissions=payload.answers, tier=package.tier)
+
+    if payload.correct_count is None or payload.question_count is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This lesson needs quiz answers for completion.")
+
+    grade_sort_order = lesson.leaf.branch.grade_level.sort_order
+    passing_score = passing_score_for_tier(tier_for_grade_sort_order(grade_sort_order), payload.question_count)
+    feedback = [
+        QuizFeedback(
+            question_id="legacy-review",
+            is_correct=payload.correct_count >= passing_score,
+            correct_answer="Review the lesson and answer the practice questions.",
+            explanation="Legacy review practice is scored in the browser because this saved lesson has no structured quiz package.",
+            lesson_reference="Review Practice",
+        )
+    ]
+    return QuizScoreResult(
+        correct_count=payload.correct_count,
+        question_count=payload.question_count,
+        passed=payload.correct_count >= passing_score,
+        passing_score=passing_score,
+        feedback=feedback,
+    )
+
+
+def parse_lesson_metadata(raw_payload_json: str) -> dict[str, object]:
+    try:
+        payload = json.loads(raw_payload_json)
+    except json.JSONDecodeError:
+        payload = {}
+
+    lesson_package = parse_optional_model(payload.get("lesson_package"), LessonPackage)
+    quiz_payload = payload.get("quiz")
+    quiz = None
+    if isinstance(quiz_payload, list):
+        try:
+            quiz = [QuizQuestion.model_validate(question) for question in quiz_payload]
+        except ValueError:
+            quiz = None
+
+    mastery_evidence = parse_optional_model(payload.get("mastery_evidence"), MasteryEvidence)
+
+    return {
+        "recovered": bool(payload.get("recovered", False)),
+        "recovery_detail": payload.get("recovery_detail") if isinstance(payload.get("recovery_detail"), str) else None,
+        "stream_model": payload.get("model") if isinstance(payload.get("model"), str) else None,
+        "lesson_package": lesson_package,
+        "quiz": quiz,
+        "mastery_evidence": mastery_evidence,
+        "curriculum_spec_id": payload.get("curriculum_spec_id") if isinstance(payload.get("curriculum_spec_id"), str) else None,
+        "generation_quality": payload.get("generation_quality") if isinstance(payload.get("generation_quality"), str) else None,
+    }
+
+
+def parse_optional_model(value: object, model_type):
+    if not isinstance(value, dict):
+        return None
+    try:
+        return model_type.model_validate(value)
+    except ValueError:
+        return None
+
+
+def lesson_stream_chunks(content: str):
+    blocks = [block.strip() for block in re.split(r"(\n\n+)", content) if block.strip()]
+    for block in blocks:
+        yield f"{block}\n\n"
 
 
 def sse_event(event: str, data: dict[str, Any]) -> str:
