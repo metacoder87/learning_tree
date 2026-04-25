@@ -25,7 +25,7 @@
 - [x] Add layout generation for newly created leaves and branches
 - [x] Replace multi-agent lesson generation with a single-model streaming Ollama pipeline
 - [x] Add timeout and offline-health handling around Ollama
-- [ ] Add stronger retry and recovery handling for interrupted lesson streams
+- [x] Add stronger recovery handling and visible fallback notices for interrupted lesson streams
 
 ## Priority 4: Tree World and Progression
 
@@ -35,7 +35,7 @@
 
 ## Priority 5: Quality and Operations
 
-- [ ] Add backend API tests
-- [ ] Add frontend component and interaction tests
-- [ ] Add migration tooling for SQLite schema changes
-- [ ] Add one-command local setup and run scripts
+- [x] Add backend API tests
+- [x] Add frontend component and interaction tests
+- [x] Add migration tooling for SQLite schema changes
+- [x] Add one-command local setup and run scripts

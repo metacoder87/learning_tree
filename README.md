@@ -7,11 +7,11 @@ This repository currently delivers a working MVP for profile-based learning, str
 ## Current capabilities
 
 - Full-screen React Three Fiber tree interface with touch-friendly leaf targets
-- Local child profiles with a profile gate before entering the tree
+- Local learner profiles with selectable learner levels before entering the tree
 - Profile-specific tree mastery colors and recent lesson history
 - Streaming lesson generation over Server-Sent Events from a single local Ollama model
 - Immediate lesson rendering as text arrives in the frontend
-- Local lesson persistence and mastery progression per leaf
+- Local lesson persistence and challenge-based mastery progression per leaf
 - Warmup mini-games while waiting for the first lesson token
 - Web Speech API support for leaf titles, lesson reading, and game prompts
 - Dynamic branch growth with locally generated new leaves
@@ -34,9 +34,9 @@ Implemented:
 Still open:
 
 - True infinite canopy with streamed world chunks
-- Persistent migration tooling
-- Automated frontend and backend test coverage
-- Packaging and one-command setup
+- Full Alembic-style migration tooling
+- Broader frontend and backend test coverage
+- End-user packaging beyond the local setup/run scripts
 - Advanced citation-grounded academic workflows
 - Curriculum modes beyond the current child-first MVP
 
@@ -55,7 +55,7 @@ Still open:
 Responsibilities:
 
 - Render the immersive 3D tree
-- Manage profile selection and local lesson UI state
+- Manage profile selection, learner level selection, and local lesson UI state
 - Fetch tree and lesson history data
 - Start lesson streams and render tokens in real time
 - Run warmup games while waiting for the first token
@@ -74,7 +74,7 @@ Responsibilities:
 - Serve profile, tree, lesson-history, and health endpoints
 - Resolve learner context for lesson generation
 - Stream lesson text from a single Ollama model over SSE
-- Persist finished lessons and update mastery progress
+- Persist generated lessons and update mastery progress after lesson challenges
 - Generate additional leaves for branches
 
 ### Lesson generation model
@@ -88,7 +88,8 @@ Lesson generation now works as a single-model streaming pipeline:
 3. The backend builds one tutoring prompt for Ollama.
 4. Ollama streams lesson markdown back through `text/event-stream`.
 5. The frontend appends lesson text live as it arrives.
-6. When the stream completes, the backend saves the lesson and increments mastery for that leaf.
+6. When the stream completes, the backend saves the lesson.
+7. When the learner passes the lesson challenge, the backend marks completion and increments mastery for that leaf.
 
 This architecture is designed to reduce latency and remove the timeout problems caused by the old multi-agent path.
 
@@ -125,6 +126,7 @@ learning_tree/
 |       |   |   |-- layout/
 |       |   |   |-- lessons/
 |       |   |   |-- profiles/
+|       |   |   |-- rewards/
 |       |   |   |-- tree/
 |       |   |   `-- warmup/
 |       |   |-- lib/
@@ -165,7 +167,7 @@ On first backend startup, the database is created and seeded automatically.
 ## Runtime requirements
 
 - Python 3.11+
-- Node.js 20+
+- Node.js 20.19+ or 22.12+
 - npm 10+
 - Ollama installed locally
 - At least one Ollama model pulled locally
@@ -178,6 +180,22 @@ Default model settings:
 The current lesson path prefers fast first-token response for the MVP.
 
 ## Quick start
+
+### One-command local setup
+
+From the repository root:
+
+```powershell
+.\scripts\setup.ps1
+```
+
+Start Ollama separately, then run both local app servers:
+
+```powershell
+.\scripts\run-dev.ps1
+```
+
+The script opens separate PowerShell windows for the API and web app.
 
 ### 1. Start Ollama
 
@@ -234,7 +252,8 @@ Typical learner flow:
 4. Start the lesson.
 5. Wait briefly for the first streamed token.
 6. Read or listen to the lesson as it appears live.
-7. Revisit the leaf later to build mastery.
+7. Complete the lesson challenge to build mastery.
+8. Revisit the leaf later for more practice.
 
 ## Configuration
 
@@ -298,7 +317,7 @@ Returns seeded grade, branch, and leaf data with profile-specific mastery merged
 
 - `GET /api/profiles/{profile_id}/lessons`
 
-Returns recent saved lessons for that profile.
+Returns recent saved lessons for that profile, including completion state and fallback-recovery metadata when a local fallback lesson was saved.
 
 ### Streamed lesson generation
 
@@ -324,6 +343,8 @@ Current SSE events:
 - `replace`
 - `complete`
 - `error`
+
+If the live Ollama stream fails, the backend emits a `replace` event with a local fallback lesson and stores `recovered`, `recovery_detail`, and `stream_model` metadata with the saved lesson.
 
 The backend streams lesson text as it is generated, then sends a final completion payload after the lesson is saved locally.
 
@@ -358,9 +379,10 @@ When a lesson starts:
 
 - the lesson modal opens immediately
 - a subtle waiting state shows until the first token arrives
-- the warmup game only appears if generation has not started streaming yet
+- the warmup game appears only while the app is waiting for the first streamed token
 - streamed lesson text is appended live into the reader
 - the warmup game closes as soon as the first token is received
+- recovered fallback lessons show a persistent notice in the lesson reader
 
 ### Speech
 
@@ -390,17 +412,19 @@ Limits:
 Recent verification completed in this repository:
 
 - backend Python syntax compilation
-- normalization regression tests
+- backend normalization, API, migration, and SQLite foreign-key regression tests
+- frontend TypeScript checks
+- frontend SSE, profile, warmup, and lesson reader component tests
 - frontend production build with Vite
 
-The frontend currently builds successfully but still emits a large bundle-size warning because of the 3D stack.
+The frontend currently builds successfully. The 3D tree and reward games are code-split, but the Three/R3F chunks remain the largest frontend assets.
 
 ## Known limitations
 
 - The canopy is still finite rather than truly infinite
-- Seeded curriculum is still focused on early learning through elementary levels
-- There is no migration system yet
-- Test coverage is still limited
+- Seeded curriculum is broad but still shallow at each grade/subject branch
+- Migration tooling is a small in-app runner, not a full Alembic workflow
+- Test coverage is improved but still not exhaustive
 - Advanced higher-ed and research workflows are not implemented
 - Lesson quality still depends heavily on the locally installed Ollama model and machine performance
 
@@ -456,6 +480,7 @@ Frontend:
 - `apps/web/src/features/profiles/hooks/useProfiles.ts`
 - `apps/web/src/features/lessons/hooks/useLessonHistory.ts`
 - `apps/web/src/features/lessons/components/LessonReader.tsx`
+- `apps/web/src/features/rewards/components/RewardGameModal.tsx`
 - `apps/web/src/features/warmup/components/WarmupGameModal.tsx`
 
 ## Summary
