@@ -13,8 +13,16 @@ interface ProfileSelectorProps {
   profiles: ProfileSummary[];
   selectedProfileId: number | null;
   onChooseProfile: (profileId: number) => void;
-  onCreateProfile: (displayName: string) => Promise<void>;
+  onCreateProfile: (displayName: string, ageBand: string) => Promise<void>;
 }
+
+const AGE_BAND_OPTIONS = [
+  { value: "early-reader", label: "Early Reader" },
+  { value: "elementary", label: "Elementary" },
+  { value: "middle-school", label: "Middle School" },
+  { value: "high-school", label: "High School" },
+  { value: "higher-ed", label: "Higher Ed" },
+];
 
 
 export function ProfileSelector({
@@ -26,6 +34,7 @@ export function ProfileSelector({
   onCreateProfile,
 }: ProfileSelectorProps) {
   const [draftName, setDraftName] = useState("");
+  const [draftAgeBand, setDraftAgeBand] = useState("elementary");
   const [isAddingProfile, setIsAddingProfile] = useState(false);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
@@ -35,8 +44,9 @@ export function ProfileSelector({
       return;
     }
 
-    await onCreateProfile(nextName);
+    await onCreateProfile(nextName, draftAgeBand);
     setDraftName("");
+    setDraftAgeBand("elementary");
     setIsAddingProfile(false);
   };
 
@@ -88,6 +98,21 @@ export function ProfileSelector({
                 value={draftName}
                 onChange={(event) => setDraftName(event.target.value)}
               />
+              <label className="profile-gate-field">
+                <span>Learner Level</span>
+                <select
+                  aria-label="Learner level"
+                  className="profile-gate-input"
+                  value={draftAgeBand}
+                  onChange={(event) => setDraftAgeBand(event.target.value)}
+                >
+                  {AGE_BAND_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <div className="profile-gate-form-actions">
                 <button className="profile-gate-create-button" type="submit" disabled={isLoading || draftName.trim().length === 0}>
                   Create Profile
@@ -97,6 +122,7 @@ export function ProfileSelector({
                   type="button"
                   onClick={() => {
                     setDraftName("");
+                    setDraftAgeBand("elementary");
                     setIsAddingProfile(false);
                   }}
                   disabled={isLoading}

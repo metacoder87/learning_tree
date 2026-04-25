@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { gradeTierFromTitle } from "../../lessons/utils/challenge";
 
@@ -7,6 +7,7 @@ type RewardGameType = "bubble-pop" | "pattern-caterpillar" | "dewdrop-catcher";
 
 interface RewardGameModalProps {
   gradeTitle: string;
+  gameTargets?: string[];
   isOpen: boolean;
   onClose: () => void;
   onSpeakText: (text: string) => void;
@@ -55,6 +56,11 @@ const BUBBLE_SLOTS = [
   { left: 70, top: 58 },
   { left: 84, top: 76 },
 ];
+
+
+export function capRewardScore(score: number, goal: number) {
+  return Math.max(0, Math.min(score, goal));
+}
 
 
 function poolWords(vocabularyWords: string[]) {
@@ -166,30 +172,48 @@ function bubbleInstruction(subject: string, gradeTitle: string) {
 
 function BubblePopGame({
   gradeTitle,
+  onComplete,
+  onProgress,
   seed,
   subject,
   vocabularyWords,
   onSpeakText,
 }: {
   gradeTitle: string;
+  onComplete: () => void;
+  onProgress: (score: number, goal: number) => void;
   seed: number;
   subject: string;
   vocabularyWords: string[];
   onSpeakText: (text: string) => void;
 }) {
   const bubbles = useMemo(() => buildBubbleWords(vocabularyWords, seed, gradeTitle, subject), [gradeTitle, seed, subject, vocabularyWords]);
-  const candidates = useMemo(() => bubbles.map((bubble) => bubble.label), [bubbles]);
-  const [targetIndex, setTargetIndex] = useState(candidates.length > 0 ? seed % candidates.length : 0);
+  const [targetIndex, setTargetIndex] = useState(seed);
   const [poppedIds, setPoppedIds] = useState<number[]>([]);
+  const completionNotifiedRef = useRef(false);
+  const goal = Math.min(5, bubbles.length);
+  const score = capRewardScore(poppedIds.length, goal);
+  const availableBubbles = useMemo(
+    () => bubbles.filter((bubble) => !poppedIds.includes(bubble.id)),
+    [bubbles, poppedIds],
+  );
+  const targetBubble = availableBubbles.length > 0 ? availableBubbles[targetIndex % availableBubbles.length] : null;
 
   useEffect(() => {
-    const currentWord = candidates[targetIndex];
-    if (currentWord) {
-      onSpeakText(`Find ${currentWord}.`);
+    if (targetBubble && score < goal) {
+      onSpeakText(`Find ${targetBubble.label}.`);
     }
-  }, [candidates, onSpeakText, targetIndex]);
+  }, [goal, onSpeakText, score, targetBubble]);
 
-  const targetWord = candidates[targetIndex] ?? "";
+  useEffect(() => {
+    onProgress(score, goal);
+    if (score >= goal && goal > 0 && !completionNotifiedRef.current) {
+      completionNotifiedRef.current = true;
+      onComplete();
+    }
+  }, [goal, onComplete, onProgress, score]);
+
+  const targetWord = score >= goal ? "complete" : targetBubble?.label ?? "complete";
 
   return (
     <div className="warmup-card bubble-pop-game">
@@ -212,13 +236,22 @@ function BubblePopGame({
                 zIndex: bubbles.length - bubble.id,
               }}
               onClick={() => {
-                if (bubble.label !== targetWord) {
+                if (!targetBubble || score >= goal || poppedIds.includes(bubble.id)) {
+                  return;
+                }
+
+                if (bubble.id !== targetBubble.id) {
                   onSpeakText(`Try again. Find ${targetWord}.`);
                   return;
                 }
 
-                setPoppedIds((currentIds) => [...currentIds, bubble.id]);
-                setTargetIndex((currentIndex) => (currentIndex + 1) % candidates.length);
+                setPoppedIds((currentIds) => {
+                  if (currentIds.includes(bubble.id)) {
+                    return currentIds;
+                  }
+                  return [...currentIds, bubble.id];
+                });
+                setTargetIndex((currentIndex) => currentIndex + 1);
                 onSpeakText(`${bubble.label}. Pop.`);
               }}
             >
@@ -313,12 +346,16 @@ function patternRoundsFor(subject: string, gradeTitle: string, vocabularyWords: 
 
 function PatternCaterpillarGame({
   gradeTitle,
+  onComplete,
+  onProgress,
   onSpeakText,
   seed,
   subject,
   vocabularyWords,
 }: {
   gradeTitle: string;
+  onComplete: () => void;
+  onProgress: (score: number, goal: number) => void;
   onSpeakText: (text: string) => void;
   seed: number;
   subject: string;
@@ -329,12 +366,26 @@ function PatternCaterpillarGame({
   const [selectedChoice, setSelectedChoice] = useState<PatternChoice | null>(null);
   const [draggingChoice, setDraggingChoice] = useState<PatternChoice | null>(null);
   const [floatingPosition, setFloatingPosition] = useState<{ x: number; y: number } | null>(null);
+  const [completedRounds, setCompletedRounds] = useState(0);
   const dropZoneRef = useRef<HTMLButtonElement | null>(null);
+  const roundCompletionLockRef = useRef(false);
+  const completionNotifiedRef = useRef(false);
   const round = rounds[roundIndex % rounds.length];
+  const goal = Math.min(3, Math.max(2, rounds.length));
+  const score = capRewardScore(completedRounds, goal);
 
   useEffect(() => {
     onSpeakText(round.prompt);
+    roundCompletionLockRef.current = false;
   }, [onSpeakText, round.prompt]);
+
+  useEffect(() => {
+    onProgress(score, goal);
+    if (score >= goal && !completionNotifiedRef.current) {
+      completionNotifiedRef.current = true;
+      onComplete();
+    }
+  }, [goal, onComplete, onProgress, score]);
 
   useEffect(() => {
     if (!draggingChoice) {
@@ -368,9 +419,22 @@ function PatternCaterpillarGame({
       }
 
       if (choice.value === round.answer.value) {
+        if (roundCompletionLockRef.current || completedRounds >= goal) {
+          return;
+        }
+
+        roundCompletionLockRef.current = true;
         onSpeakText("Nice pattern!");
         setSelectedChoice(null);
-        setRoundIndex((currentIndex) => currentIndex + 1);
+        setCompletedRounds((currentRounds) => {
+          if (currentRounds >= goal) {
+            return currentRounds;
+          }
+          return currentRounds + 1;
+        });
+        if (completedRounds + 1 < goal) {
+          setRoundIndex((currentIndex) => currentIndex + 1);
+        }
         return;
       }
 
@@ -384,7 +448,7 @@ function PatternCaterpillarGame({
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
     };
-  }, [draggingChoice, onSpeakText, round.answer.value]);
+  }, [completedRounds, draggingChoice, goal, onSpeakText, round.answer.value]);
 
   const attemptDrop = (choice: PatternChoice | null) => {
     if (!choice) {
@@ -393,9 +457,22 @@ function PatternCaterpillarGame({
     }
 
     if (choice.value === round.answer.value) {
+      if (roundCompletionLockRef.current || completedRounds >= goal) {
+        return;
+      }
+
+      roundCompletionLockRef.current = true;
       onSpeakText("Nice pattern!");
       setSelectedChoice(null);
-      setRoundIndex((currentIndex) => currentIndex + 1);
+      setCompletedRounds((currentRounds) => {
+        if (currentRounds >= goal) {
+          return currentRounds;
+        }
+        return currentRounds + 1;
+      });
+      if (completedRounds + 1 < goal) {
+        setRoundIndex((currentIndex) => currentIndex + 1);
+      }
       return;
     }
 
@@ -476,10 +553,14 @@ function dropStepForGrade(gradeTitle: string) {
 
 function DewdropCatcherGame({
   gradeTitle,
+  onComplete,
+  onProgress,
   onSpeakText,
   seed,
 }: {
   gradeTitle: string;
+  onComplete: () => void;
+  onProgress: (score: number, goal: number) => void;
   onSpeakText: (text: string) => void;
   seed: number;
 }) {
@@ -487,13 +568,20 @@ function DewdropCatcherGame({
   const [basketX, setBasketX] = useState(36 + (seed % 5) * 10);
   const [count, setCount] = useState(0);
   const nextDropIdRef = useRef(1);
+  const completionNotifiedRef = useRef(false);
   const step = dropStepForGrade(gradeTitle);
+  const goal = step * 5;
+  const score = capRewardScore(count, goal);
 
   useEffect(() => {
     onSpeakText(`Catch the drops and count by ${step}.`);
   }, [onSpeakText, step]);
 
   useEffect(() => {
+    if (count >= goal) {
+      return;
+    }
+
     const spawnTimer = window.setInterval(() => {
       setDrops((currentDrops) => [
         ...currentDrops,
@@ -507,9 +595,13 @@ function DewdropCatcherGame({
     }, 780 + (seed % 4) * 80);
 
     return () => window.clearInterval(spawnTimer);
-  }, [seed, step]);
+  }, [count, goal, seed, step]);
 
   useEffect(() => {
+    if (count >= goal) {
+      return;
+    }
+
     const tickTimer = window.setInterval(() => {
       setDrops((currentDrops) => {
         const nextDrops: FallingDrop[] = [];
@@ -531,9 +623,10 @@ function DewdropCatcherGame({
 
         if (catches > 0) {
           setCount((currentCount) => {
-            const nextCount = currentCount + catches * step;
-            onSpeakText(String(nextCount));
-            return nextCount;
+            if (currentCount >= goal) {
+              return currentCount;
+            }
+            return capRewardScore(currentCount + catches * step, goal);
           });
         }
 
@@ -542,7 +635,18 @@ function DewdropCatcherGame({
     }, 120);
 
     return () => window.clearInterval(tickTimer);
-  }, [basketX, onSpeakText, step]);
+  }, [basketX, count, goal, step]);
+
+  useEffect(() => {
+    onProgress(score, goal);
+    if (score > 0) {
+      onSpeakText(String(score));
+    }
+    if (score >= goal && !completionNotifiedRef.current) {
+      completionNotifiedRef.current = true;
+      onComplete();
+    }
+  }, [goal, onComplete, onProgress, onSpeakText, score]);
 
   return (
     <div className="warmup-card dewdrop-game">
@@ -580,6 +684,7 @@ function DewdropCatcherGame({
 
 export function RewardGameModal({
   gradeTitle,
+  gameTargets = [],
   isOpen,
   onClose,
   onSpeakText,
@@ -589,7 +694,12 @@ export function RewardGameModal({
 }: RewardGameModalProps) {
   const [shouldRender, setShouldRender] = useState(isOpen);
   const [isVisible, setIsVisible] = useState(isOpen);
+  const [isRewardComplete, setIsRewardComplete] = useState(false);
+  const [rewardScore, setRewardScore] = useState({ score: 0, goal: 1 });
+  const [replayKey, setReplayKey] = useState(0);
+  const completionAnnouncedRef = useRef(false);
   const gameType = useMemo(() => selectRewardGame(sessionKey, subject, gradeTitle), [gradeTitle, sessionKey, subject]);
+  const activeWords = useMemo(() => (gameTargets.length > 0 ? gameTargets : vocabularyWords), [gameTargets, vocabularyWords]);
 
   useEffect(() => {
     if (isOpen) {
@@ -603,6 +713,32 @@ export function RewardGameModal({
     return () => window.clearTimeout(timeoutId);
   }, [isOpen]);
 
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    setIsRewardComplete(false);
+    setRewardScore({ score: 0, goal: 1 });
+    setReplayKey(0);
+    completionAnnouncedRef.current = false;
+  }, [gameType, isOpen, sessionKey]);
+
+  const handleRewardProgress = useCallback((score: number, goal: number) => {
+    setRewardScore({
+      score: capRewardScore(score, goal),
+      goal,
+    });
+  }, []);
+
+  const handleRewardComplete = useCallback(() => {
+    if (!completionAnnouncedRef.current) {
+      completionAnnouncedRef.current = true;
+      onSpeakText("Reward complete.");
+    }
+    setIsRewardComplete(true);
+  }, [onSpeakText]);
+
   if (!shouldRender) {
     return null;
   }
@@ -615,6 +751,9 @@ export function RewardGameModal({
             <p className="lesson-kicker">Lesson Reward</p>
             <h2 className="reward-modal-title">You earned a tree game.</h2>
           </div>
+          <p className={isRewardComplete ? "reward-round-status complete" : "reward-round-status"}>
+            {isRewardComplete ? "Reward complete" : `Round ${rewardScore.score}/${rewardScore.goal}`}
+          </p>
           <button className="lesson-reader-close" type="button" onClick={onClose}>
             Close
           </button>
@@ -622,26 +761,54 @@ export function RewardGameModal({
 
         {gameType === "bubble-pop" ? (
           <BubblePopGame
-            key={`reward-bubble-${sessionKey}`}
+            key={`reward-bubble-${sessionKey}-${replayKey}`}
             gradeTitle={gradeTitle}
+            onComplete={handleRewardComplete}
+            onProgress={handleRewardProgress}
             seed={sessionKey}
             subject={subject}
-            vocabularyWords={vocabularyWords}
+            vocabularyWords={activeWords}
             onSpeakText={onSpeakText}
           />
         ) : null}
         {gameType === "pattern-caterpillar" ? (
           <PatternCaterpillarGame
-            key={`reward-pattern-${sessionKey}`}
+            key={`reward-pattern-${sessionKey}-${replayKey}`}
             gradeTitle={gradeTitle}
+            onComplete={handleRewardComplete}
+            onProgress={handleRewardProgress}
             onSpeakText={onSpeakText}
             seed={sessionKey}
             subject={subject}
-            vocabularyWords={vocabularyWords}
+            vocabularyWords={activeWords}
           />
         ) : null}
         {gameType === "dewdrop-catcher" ? (
-          <DewdropCatcherGame key={`reward-dew-${sessionKey}`} gradeTitle={gradeTitle} onSpeakText={onSpeakText} seed={sessionKey} />
+          <DewdropCatcherGame
+            key={`reward-dew-${sessionKey}-${replayKey}`}
+            gradeTitle={gradeTitle}
+            onComplete={handleRewardComplete}
+            onProgress={handleRewardProgress}
+            onSpeakText={onSpeakText}
+            seed={sessionKey}
+          />
+        ) : null}
+
+        {isRewardComplete ? (
+          <div className="reward-complete-actions">
+            <button
+              className="grow-button secondary"
+              type="button"
+              onClick={() => {
+                setIsRewardComplete(false);
+                setRewardScore({ score: 0, goal: 1 });
+                completionAnnouncedRef.current = false;
+                setReplayKey((currentKey) => currentKey + 1);
+              }}
+            >
+              Replay Round
+            </button>
+          </div>
         ) : null}
       </div>
     </div>

@@ -69,7 +69,7 @@ export async function streamSse(
 }
 
 
-function parseSseEvent(rawEvent: string): SseMessage | null {
+export function parseSseEvent(rawEvent: string): SseMessage | null {
   const lines = rawEvent.split("\n");
   let eventName = "message";
   const dataLines: string[] = [];

@@ -112,7 +112,8 @@ export function LessonReader({
     return null;
   }
 
-  const blocks = parseLessonBlocks(lesson.content);
+  const lessonPackage = lesson.lesson_package ?? null;
+  const blocks = lessonPackage ? [] : parseLessonBlocks(lesson.content);
   const canReadFullLesson = lesson.content.trim().length > 0;
 
   return (
@@ -132,6 +133,17 @@ export function LessonReader({
         </div>
 
         <div className="lesson-reader-body">
+          {lesson.recovered ? (
+            <div className="lesson-recovery-notice" role="status">
+              <strong>Local fallback lesson loaded.</strong>
+              <span>
+                {lesson.recovery_detail
+                  ? ` ${lesson.recovery_detail}`
+                  : " The live AI stream was interrupted, so Learning Tree saved a local fallback lesson."}
+              </span>
+            </div>
+          ) : null}
+
           {isWaitingForFirstToken ? (
             <div className="lesson-reader-loading">
               <div className="lesson-spinner" aria-hidden="true" />
@@ -139,8 +151,61 @@ export function LessonReader({
             </div>
           ) : null}
 
-          {!isWaitingForFirstToken && blocks.length === 0 ? (
+          {!isWaitingForFirstToken && !lessonPackage && blocks.length === 0 ? (
             <p className="lesson-reader-paragraph">Your lesson will appear here.</p>
+          ) : null}
+
+          {lessonPackage ? (
+            <div className="lesson-package-stack">
+              {lessonPackage.sections.map((section) => (
+                <section key={`${lesson.id}-${section.kind}`} className={`lesson-package-section ${section.kind}`}>
+                  <h3 className="lesson-reader-section">{section.title}</h3>
+                  <p className="lesson-reader-paragraph">{section.body}</p>
+                </section>
+              ))}
+
+              <section className="lesson-package-section worked-examples">
+                <h3 className="lesson-reader-section">Worked Example</h3>
+                {lessonPackage.worked_examples.map((example) => (
+                  <div key={example.id} className="lesson-detail-panel">
+                    <strong>{example.prompt}</strong>
+                    <ol>
+                      {example.steps.map((step) => (
+                        <li key={`${example.id}-${step}`}>{step}</li>
+                      ))}
+                    </ol>
+                    <p>{example.answer}</p>
+                  </div>
+                ))}
+              </section>
+
+              <section className="lesson-package-section guided-practice">
+                <h3 className="lesson-reader-section">Guided Practice</h3>
+                {lessonPackage.guided_practice.map((practice) => (
+                  <div key={practice.id} className="lesson-detail-panel">
+                    <strong>{practice.prompt}</strong>
+                    <p>{practice.expected_response_hint}</p>
+                  </div>
+                ))}
+              </section>
+
+              <section className="lesson-package-section vocabulary">
+                <h3 className="lesson-reader-section">Vocabulary</h3>
+                <div className="lesson-vocabulary-grid">
+                  {lessonPackage.vocabulary.map((item) => (
+                    <button
+                      key={item.term}
+                      type="button"
+                      className="lesson-vocabulary-card"
+                      onClick={() => onSpeakText(`${item.term}. ${item.definition}`)}
+                    >
+                      <strong>{item.term}</strong>
+                      <span>{item.definition}</span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            </div>
           ) : null}
 
           {blocks.map((block, index) => {

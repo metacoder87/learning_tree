@@ -5,6 +5,7 @@ import { fetchJson } from "../../../lib/api";
 
 const PROFILE_STORAGE_KEY = "learning-tree-profile-id";
 const DEFAULT_PROFILE_NAME = "Explorer";
+const DEFAULT_AGE_BAND = "elementary";
 
 interface ProfileSummary {
   id: number;
@@ -23,7 +24,7 @@ interface UseProfilesResult {
   isLoading: boolean;
   error: string | null;
   selectProfile: (profileId: number) => void;
-  createProfile: (displayName: string) => Promise<number | null>;
+  createProfile: (displayName: string, ageBand?: string) => Promise<number | null>;
   refreshProfiles: () => Promise<void>;
 }
 
@@ -33,7 +34,7 @@ async function listProfiles() {
 }
 
 
-async function createProfileRequest(displayName: string) {
+async function createProfileRequest(displayName: string, ageBand = DEFAULT_AGE_BAND) {
   return fetchJson<CreatedProfile>("/api/profiles", {
     method: "POST",
     headers: {
@@ -41,7 +42,7 @@ async function createProfileRequest(displayName: string) {
     },
     body: JSON.stringify({
       display_name: displayName,
-      age_band: "elementary",
+      age_band: ageBand,
     }),
   });
 }
@@ -99,7 +100,7 @@ export function useProfiles(): UseProfilesResult {
   }, []);
 
   const createProfile = useCallback(
-    async (displayName: string) => {
+    async (displayName: string, ageBand = DEFAULT_AGE_BAND) => {
       const trimmedName = displayName.trim();
       if (!trimmedName) {
         return null;
@@ -109,7 +110,7 @@ export function useProfiles(): UseProfilesResult {
       setError(null);
 
       try {
-        const createdProfile = await createProfileRequest(trimmedName);
+        const createdProfile = await createProfileRequest(trimmedName, ageBand);
         const nextProfiles = [...profiles, createdProfile].sort((left, right) => left.id - right.id);
         setProfiles(nextProfiles);
         setSelectedProfileId(createdProfile.id);

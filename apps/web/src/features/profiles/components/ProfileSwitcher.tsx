@@ -11,8 +11,16 @@ interface ProfileSwitcherProps {
   selectedProfileId: number | null;
   isLoading: boolean;
   onSelectProfile: (profileId: number) => void;
-  onCreateProfile: (displayName: string) => Promise<void>;
+  onCreateProfile: (displayName: string, ageBand: string) => Promise<void>;
 }
+
+const AGE_BAND_OPTIONS = [
+  { value: "early-reader", label: "Early Reader" },
+  { value: "elementary", label: "Elementary" },
+  { value: "middle-school", label: "Middle School" },
+  { value: "high-school", label: "High School" },
+  { value: "higher-ed", label: "Higher Ed" },
+];
 
 
 export function ProfileSwitcher({
@@ -23,6 +31,7 @@ export function ProfileSwitcher({
   onCreateProfile,
 }: ProfileSwitcherProps) {
   const [draftName, setDraftName] = useState("");
+  const [draftAgeBand, setDraftAgeBand] = useState("elementary");
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -31,8 +40,9 @@ export function ProfileSwitcher({
       return;
     }
 
-    await onCreateProfile(nextName);
+    await onCreateProfile(nextName, draftAgeBand);
     setDraftName("");
+    setDraftAgeBand("elementary");
   };
 
   return (
@@ -65,6 +75,18 @@ export function ProfileSwitcher({
           value={draftName}
           onChange={(event) => setDraftName(event.target.value)}
         />
+        <select
+          aria-label="New profile learner level"
+          className="profile-input"
+          value={draftAgeBand}
+          onChange={(event) => setDraftAgeBand(event.target.value)}
+        >
+          {AGE_BAND_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
         <button className="profile-add-button" type="submit" disabled={isLoading || draftName.trim().length === 0}>
           Add
         </button>

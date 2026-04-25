@@ -1,22 +1,40 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ParentMenuDrawer } from "./features/layout/components/ParentMenuDrawer";
 import { LessonChallengeModal } from "./features/lessons/components/LessonChallengeModal";
 import { LessonReader } from "./features/lessons/components/LessonReader";
 import { useLessonHistory } from "./features/lessons/hooks/useLessonHistory";
-import type { ActiveLessonView, LessonHistoryItem } from "./features/lessons/types/lesson";
+import type {
+  ActiveLessonView,
+  LessonCompletionResponse,
+  LessonHistoryItem,
+  QuizAnswerSubmission,
+} from "./features/lessons/types/lesson";
+import { extractLessonGameTargets } from "./features/lessons/utils/gameTargets";
 import { ProfileSelector } from "./features/profiles/components/ProfileSelector";
 import { ProfileSwitcher } from "./features/profiles/components/ProfileSwitcher";
 import { useProfiles } from "./features/profiles/hooks/useProfiles";
-import { RewardGameModal } from "./features/rewards/components/RewardGameModal";
 import { AccessibleLeafNavigator } from "./features/tree/components/AccessibleLeafNavigator";
 import { CurrentLeafOverlay } from "./features/tree/components/CurrentLeafOverlay";
-import { LearningTreeCanvas } from "./features/tree/components/LearningTreeCanvas";
 import { useLeafSpeech } from "./features/tree/hooks/useLeafSpeech";
 import { useTreeData } from "./features/tree/hooks/useTreeData";
 import type { LeafNode } from "./features/tree/types/tree";
+import { WarmupGameModal } from "./features/warmup/components/WarmupGameModal";
 import { fetchJson, streamSse, type SseMessage } from "./lib/api";
 import { useAiHealth } from "./lib/useAiHealth";
+
+
+const LearningTreeCanvas = lazy(() =>
+  import("./features/tree/components/LearningTreeCanvas").then((module) => ({
+    default: module.LearningTreeCanvas,
+  })),
+);
+
+const RewardGameModal = lazy(() =>
+  import("./features/rewards/components/RewardGameModal").then((module) => ({
+    default: module.RewardGameModal,
+  })),
+);
 
 
 function findLeafById(grades: ReturnType<typeof useTreeData>["grades"], leafId: number | string | null) {
@@ -59,6 +77,11 @@ interface LessonStreamReplaceEvent {
   title: string;
   content: string;
   vocabulary_words: string[];
+  lesson_package?: LessonHistoryItem["lesson_package"];
+  quiz?: LessonHistoryItem["quiz"];
+  mastery_evidence?: LessonHistoryItem["mastery_evidence"];
+  curriculum_spec_id?: string | null;
+  generation_quality?: string | null;
   message?: string;
 }
 
@@ -72,14 +95,6 @@ interface LessonStreamCompleteEvent {
 interface LessonStreamErrorEvent {
   message: string;
 }
-
-interface LessonCompletionResponse {
-  lesson: LessonHistoryItem;
-  mastery_level: number;
-  lessons_completed: number;
-  completed_now: boolean;
-}
-
 
 function createProvisionalLesson(leaf: LeafNode): ActiveLessonView {
   return {
@@ -99,6 +114,7 @@ function createProvisionalLesson(leaf: LeafNode): ActiveLessonView {
     stream_state: "waiting",
     stream_model: null,
     recovered: false,
+    recovery_detail: null,
   };
 }
 
@@ -175,6 +191,11 @@ export default function App() {
     const recentWords = lessonHistory.flatMap((lesson) => lesson.vocabulary_words);
     return recentWords.length > 0 ? recentWords : ["sun", "tree", "leaf", "read", "count"];
   }, [lessonHistory]);
+  const lessonGameTargets = useMemo(
+    () => extractLessonGameTargets(displayedLesson, vocabularyPool),
+    [displayedLesson, vocabularyPool],
+  );
+  const lessonGameTargetLabels = useMemo(() => lessonGameTargets.map((target) => target.label), [lessonGameTargets]);
   const completedCount = useMemo(
     () =>
       grades
@@ -232,8 +253,8 @@ export default function App() {
   );
 
   const handleCreateProfileAndEnter = useCallback(
-    async (displayName: string) => {
-      const createdProfileId = await createProfile(displayName);
+    async (displayName: string, ageBand: string) => {
+      const createdProfileId = await createProfile(displayName, ageBand);
       if (createdProfileId === null) {
         return;
       }
@@ -262,8 +283,8 @@ export default function App() {
   );
 
   const handleDrawerCreateProfile = useCallback(
-    async (displayName: string) => {
-      await createProfile(displayName);
+    async (displayName: string, ageBand: string) => {
+      await createProfile(displayName, ageBand);
     },
     [createProfile],
   );
@@ -328,7 +349,13 @@ export default function App() {
                 title: payload.title,
                 content: payload.content,
                 vocabulary_words: payload.vocabulary_words,
+                lesson_package: payload.lesson_package ?? null,
+                quiz: payload.quiz ?? null,
+                mastery_evidence: payload.mastery_evidence ?? null,
+                curriculum_spec_id: payload.curriculum_spec_id ?? null,
+                generation_quality: payload.generation_quality ?? null,
                 recovered: true,
+                recovery_detail: payload.message ?? null,
                 stream_state: "streaming",
               }
             : currentLesson,
@@ -342,8 +369,9 @@ export default function App() {
         setActiveLesson({
           ...payload.lesson,
           stream_state: "complete",
-          stream_model: payload.model,
-          recovered: payload.recovered,
+          stream_model: payload.model ?? payload.lesson.stream_model ?? null,
+          recovered: payload.recovered || payload.lesson.recovered,
+          recovery_detail: payload.detail ?? payload.lesson.recovery_detail ?? null,
         });
         void refreshLessons();
         return;
@@ -472,8 +500,8 @@ export default function App() {
     setActiveLesson({
       ...lesson,
       stream_state: "complete",
-      stream_model: null,
-      recovered: false,
+      stream_model: lesson.stream_model ?? null,
+      recovered: lesson.recovered ?? false,
     });
     setSelectedLeafId(lesson.leaf_id);
     setIsChallengeOpen(false);
@@ -500,25 +528,33 @@ export default function App() {
   }, [displayedLesson]);
 
   const handleChallengePass = useCallback(
-    async ({ correctCount, questionCount }: { correctCount: number; questionCount: number }) => {
+    async (result: { correctCount: number; questionCount: number } | { answers: QuizAnswerSubmission[] }) => {
       if (selectedProfileId === null || !displayedLesson) {
-        return;
+        return undefined;
       }
 
       setIsCompletingLesson(true);
       setLessonError(null);
 
       try {
+        const completionPayload =
+          "answers" in result
+            ? {
+                profile_id: selectedProfileId,
+                answers: result.answers,
+              }
+            : {
+                profile_id: selectedProfileId,
+                correct_count: result.correctCount,
+                question_count: result.questionCount,
+              };
+
         const response = await fetchJson<LessonCompletionResponse>(`/api/lessons/${displayedLesson.id}/complete`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({
-            profile_id: selectedProfileId,
-            correct_count: correctCount,
-            question_count: questionCount,
-          }),
+          body: JSON.stringify(completionPayload),
         });
 
         setActiveLesson((currentLesson) =>
@@ -531,20 +567,25 @@ export default function App() {
               }
             : currentLesson,
         );
-        setIsChallengeOpen(false);
-        setRewardSession((currentValue) => currentValue + 1);
-        setIsRewardGameOpen(true);
         await refreshLessons();
         await refreshTree();
+        return response;
       } catch (caughtError) {
         const message = caughtError instanceof Error ? caughtError.message : "Unable to save lesson completion.";
         setLessonError(message);
+        return undefined;
       } finally {
         setIsCompletingLesson(false);
       }
     },
     [displayedLesson, refreshLessons, refreshTree, selectedProfileId],
   );
+
+  const handleClaimReward = useCallback(() => {
+    setIsChallengeOpen(false);
+    setRewardSession((currentValue) => currentValue + 1);
+    setIsRewardGameOpen(true);
+  }, []);
 
   const closeLessonReader = useCallback(() => {
     if (isGeneratingLesson) {
@@ -584,14 +625,24 @@ export default function App() {
 
   return (
     <>
-      <RewardGameModal
-        gradeTitle={displayedLesson?.grade_title ?? selectedLeaf?.gradeTitle ?? "Grade 1"}
-        isOpen={isRewardGameOpen}
-        onClose={() => setIsRewardGameOpen(false)}
+      <Suspense fallback={null}>
+        <RewardGameModal
+          gradeTitle={displayedLesson?.grade_title ?? selectedLeaf?.gradeTitle ?? "Grade 1"}
+          gameTargets={lessonGameTargetLabels}
+          isOpen={isRewardGameOpen}
+          onClose={() => setIsRewardGameOpen(false)}
+          onSpeakText={speakText}
+          sessionKey={rewardSession}
+          subject={displayedLesson?.subject_title ?? selectedLeaf?.subjectTitle ?? selectedLeaf?.subjectKey ?? ""}
+          vocabularyWords={displayedLesson?.vocabulary_words ?? vocabularyPool}
+        />
+      </Suspense>
+
+      <WarmupGameModal
+        isOpen={isGeneratingLesson && isWaitingForFirstToken}
+        leaf={selectedLeaf}
+        lessonTargets={lessonGameTargetLabels}
         onSpeakText={speakText}
-        sessionKey={rewardSession}
-        subject={displayedLesson?.subject_title ?? selectedLeaf?.subjectTitle ?? selectedLeaf?.subjectKey ?? ""}
-        vocabularyWords={displayedLesson?.vocabulary_words ?? vocabularyPool}
       />
 
       <LessonChallengeModal
@@ -599,6 +650,7 @@ export default function App() {
         isSubmitting={isCompletingLesson}
         lesson={displayedLesson}
         onClose={() => setIsChallengeOpen(false)}
+        onClaimReward={handleClaimReward}
         onPass={handleChallengePass}
       />
 
@@ -631,13 +683,15 @@ export default function App() {
       ) : (
         <main className="immersive-app">
           <section className="immersive-stage">
-            <LearningTreeCanvas
-              grades={grades}
-              selectedLeafId={selectedLeafId}
-              onBranchLaunch={handleBranchLaunch}
-              onLeafSelect={handleLeafSelect}
-              onLeafAnnounce={speakText}
-            />
+            <Suspense fallback={<div className="tree-stage-message">Growing your tree...</div>}>
+              <LearningTreeCanvas
+                grades={grades}
+                selectedLeafId={selectedLeafId}
+                onBranchLaunch={handleBranchLaunch}
+                onLeafSelect={handleLeafSelect}
+                onLeafAnnounce={speakText}
+              />
+            </Suspense>
           </section>
 
           <button
