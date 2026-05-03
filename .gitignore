@@ -9,6 +9,7 @@ pytest-cache-files*/
 coverage/
 htmlcov/
 node_modules/
+/package-lock.json
 dist/
 build/
 .vite/

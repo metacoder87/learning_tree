@@ -166,6 +166,13 @@ On first backend startup, the database is created and seeded automatically.
 
 ## Runtime requirements
 
+Docker path:
+
+- Docker Desktop or Docker Engine with Docker Compose v2
+- Enough disk space for the Ollama model volume
+
+Local path:
+
 - Python 3.11+
 - Node.js 20.19+ or 22.12+
 - npm 10+
@@ -180,6 +187,36 @@ Default model settings:
 The current lesson path prefers fast first-token response for the MVP.
 
 ## Quick start
+
+### Docker one-command setup
+
+From the repository root:
+
+```powershell
+docker compose up --build
+```
+
+The Docker stack starts:
+
+- FastAPI backend at `http://127.0.0.1:8000`
+- Vite frontend at `http://127.0.0.1:5173`
+- Ollama at `http://127.0.0.1:11434`
+
+The first startup downloads the default `llama3.2:3b` model into a persistent Docker volume named `learning_tree_ollama-data`. Later startups reuse that model volume.
+
+Docker keeps SQLite data on the host in `data/learning_tree.db` and mounts the repository into the API and web containers for local development.
+
+Stop the stack with:
+
+```powershell
+docker compose down
+```
+
+Remove the downloaded Ollama model volume only when you want a full Docker reset:
+
+```powershell
+docker compose down -v
+```
 
 ### One-command local setup
 

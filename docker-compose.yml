@@ -1,0 +1,62 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      - ollama
+    entrypoint: ["/bin/sh", "-c"]
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    volumes:
+      - ollama-data:/root/.ollama
+    command: >
+      "until ollama list >/dev/null 2>&1; do sleep 2; done;
+      ollama pull llama3.2:3b"
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile.dev
+    depends_on:
+      ollama:
+        condition: service_started
+      ollama-pull:
+        condition: service_completed_successfully
+    environment:
+      LEARNING_TREE_DATABASE_URL: sqlite:////app/data/learning_tree.db
+      LEARNING_TREE_OLLAMA_BASE_URL: http://ollama:11434
+      LEARNING_TREE_OLLAMA_FAST_MODEL: llama3.2:3b
+      LEARNING_TREE_OLLAMA_ADVANCED_MODEL: qwen3:30b
+      LEARNING_TREE_LESSON_TEMPERATURE: "0.2"
+      LEARNING_TREE_OLLAMA_TIMEOUT_SECONDS: "180"
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - ./data:/app/data
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile.dev
+    depends_on:
+      - api
+    environment:
+      VITE_API_BASE_URL: http://127.0.0.1:8000
+      CHOKIDAR_USEPOLLING: "true"
+    ports:
+      - "5173:5173"
+    volumes:
+      - .:/app
+      - web-node-modules:/app/apps/web/node_modules
+
+volumes:
+  ollama-data:
+  web-node-modules:
