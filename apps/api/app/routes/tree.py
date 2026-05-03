@@ -610,7 +610,7 @@ def lesson_stream_chunks(content: str):
 
 
 def sse_event(event: str, data: dict[str, Any]) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}"
 
 
 def resolve_branch(grade: str, subject: str, db: Session) -> SubjectBranch | None:
